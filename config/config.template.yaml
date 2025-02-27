@@ -1,0 +1,65 @@
+# LetterMonstr Configuration Template
+# Copy this file to config.yaml and fill in your personal information
+
+# Email fetching configuration
+email:
+  # Email account to fetch newsletters from
+  fetch_email: "your-email@gmail.com"
+  # App password for Gmail (never use your main password)
+  # To generate an app password: https://myaccount.google.com/apppasswords
+  password: ""  # Fill this with your Gmail app password
+  imap_server: "imap.gmail.com"
+  imap_port: 993
+  # How many days of emails to process on initial run
+  initial_lookback_days: 7
+  # Folders to check for newsletters
+  folders: ["INBOX"]
+
+# Content processing settings
+content:
+  # Maximum number of links to follow from each newsletter
+  max_links_per_email: 5
+  # Maximum depth for link crawling (1 = only direct links)
+  max_link_depth: 1
+  # User agent for web requests
+  user_agent: "LetterMonstr/1.0"
+  # Timeout for web requests in seconds
+  request_timeout: 10
+  # Filter keywords that indicate advertising content
+  ad_keywords: ["sponsored", "advertisement", "promoted", "partner", "paid"]
+
+# Database settings
+database:
+  # SQLite database file location
+  path: "data/lettermonstr.db"
+
+# Summary delivery settings
+summary:
+  # Email to send summaries to
+  recipient_email: ""  # Fill with your email address
+  # Frequency: "daily", "weekly", or "monthly"
+  frequency: "weekly"
+  # Time to send summaries (24-hour format)
+  delivery_time: "08:00"
+  # Day of week for weekly summaries (0=Monday, 6=Sunday)
+  weekly_day: 0
+  # Day of month for monthly summaries
+  monthly_day: 1
+  # SMTP server for sending emails
+  smtp_server: "smtp.gmail.com"
+  smtp_port: 587
+  # Email to send summaries from (can be same as fetch_email)
+  sender_email: "your-email@gmail.com"
+  # Subject line prefix for summary emails
+  subject_prefix: "[LetterMonstr] "
+
+# LLM settings
+llm:
+  # API key for Anthropic
+  anthropic_api_key: ""  # Fill with your Anthropic API key
+  # Model to use
+  model: "claude-3-7-sonnet-20250219"
+  # Maximum tokens for each summary
+  max_tokens: 4000
+  # Temperature setting (0.0-1.0)
+  temperature: 0.3 

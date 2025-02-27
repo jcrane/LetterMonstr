@@ -1,0 +1,31 @@
+# Email handling
+imaplib2>=2.45.0
+email-validator==2.0.0
+
+# Web and content processing
+requests==2.31.0
+beautifulsoup4==4.12.2
+lxml>=4.6.0
+
+# Natural language processing
+nltk==3.8.1
+python-dateutil==2.8.2
+
+# Database
+SQLAlchemy==2.0.19
+
+# Configuration
+pyyaml==6.0.1
+
+# Scheduling
+schedule==1.2.0
+
+# Email sending
+secure-smtplib==0.1.1
+
+# LLM integration
+anthropic==0.5.0
+
+# Utilities
+python-dotenv==1.0.0
+tqdm==4.66.1 
