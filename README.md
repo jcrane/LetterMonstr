@@ -4,7 +4,18 @@ A personal newsletter aggregator and summarizer for macOS that processes email n
 
 ## Important Note
 
-LetterMonstr is designed specifically for macOS. It has not been tested on and is not supported on Windows or Linux.
+LetterMonstr is designed specifically for macOS and meant to run on a local Mac machine. It has not been tested on and is not supported on:
+
+- Windows or Linux operating systems
+- Server environments (including cloud servers)
+- Production deployment scenarios
+
+To run LetterMonstr in a production server environment, you would need to make your own modifications to the code, such as:
+
+- Implementing proper security measures
+- Setting up service monitoring and auto-restart capabilities
+- Configuring proper logging and error handling for remote environments
+- Managing database backups and data persistence
 
 ## Features
 
@@ -296,3 +307,21 @@ Recent updates to LetterMonstr include:
 If you encounter issues:
 
 1. Check the application logs in `data/lettermonstr.log`
+2. Ensure you're running on a supported macOS version (10.15 Catalina or later)
+3. Verify that Python 3.9+ is installed and accessible via `python3` command
+4. Check that your Gmail App Password is correct and 2-Step Verification is enabled
+5. Verify that your Anthropic API key is valid and has sufficient credits
+6. Make sure all dependencies are installed correctly with `pip3 install -r requirements.txt`
+7. If the application crashes or fails to process emails, try restarting it
+
+### Running on Servers (Unsupported)
+
+LetterMonstr is designed as a personal tool for local Mac use, not as a production service. If you attempt to run it on a server:
+
+- You may encounter permission and security issues
+- The application isn't designed for multi-tenant usage
+- There are no built-in protections against API key overusage
+- The database isn't optimized for high-volume usage
+- Service monitoring and self-healing are not implemented
+
+If you need a server-based newsletter aggregation solution, consider adapting this codebase with proper server-oriented modifications or exploring enterprise solutions designed for that purpose.
