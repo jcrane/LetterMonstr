@@ -273,7 +273,7 @@ Alternatively, you can manually edit the `config/config.yaml` file to update the
 
 ```yaml
 email:
-  fetch_email: "your-newsletter-email@gmail.com"
+  fetch_email: "your-newsletter-email@example.com"
   password: "your-app-password"
   # other email settings...
 

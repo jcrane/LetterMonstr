@@ -128,7 +128,7 @@ def get_default_config():
     """Return default configuration settings."""
     return {
         "email": {
-            "fetch_email": "lettermonstr@gmail.com",
+            "fetch_email": "your-newsletter-email@example.com",
             "password": "",
             "imap_server": "imap.gmail.com",
             "imap_port": 993,
@@ -153,7 +153,7 @@ def get_default_config():
             "monthly_day": 1,
             "smtp_server": "smtp.gmail.com",
             "smtp_port": 587,
-            "sender_email": "lettermonstr@gmail.com",
+            "sender_email": "your-newsletter-email@example.com",
             "subject_prefix": "[LetterMonstr] "
         },
         "llm": {
