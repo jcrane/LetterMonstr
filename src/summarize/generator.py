@@ -101,9 +101,13 @@ class SummaryGenerator:
             # Add main content
             # If the content is very long, we'll truncate it to not exceed token limits
             content = item.get('content', '')
-            max_content_chars = 15000  # Arbitrary limit to avoid excessive tokens
+            # Increase the character limit to capture more content (Claude 3.7 has a large context window)
+            max_content_chars = 50000  # Increased from 15000 to capture more content
             if len(content) > max_content_chars:
-                content = content[:max_content_chars] + "... [CONTENT TRUNCATED]"
+                # More intelligent truncation - try to keep the beginning and important sections
+                first_part = content[:max_content_chars // 2]  # Keep the first half
+                second_part = content[-(max_content_chars // 2):]  # Keep the last half
+                content = first_part + "\n\n[...CONTENT ABBREVIATED...]\n\n" + second_part
             
             item_text += f"CONTENT:\n{content}\n\n"
             
@@ -117,27 +121,30 @@ class SummaryGenerator:
         """Create a prompt for Claude to generate a summary."""
         prompt = f"""
 You are a newsletter summarization assistant for the LetterMonstr application.
-Your task is to create a clear, concise summary of the following newsletter content.
+Your task is to create a COMPREHENSIVE summary of the following newsletter content.
 
 Follow these guidelines:
-1. Focus on factual information and key insights.
-2. Remove any redundancy or duplicate information across different sources.
-3. Organize information by topic, not by source.
-4. Remove any content that appears to be advertising or sponsored.
-5. Include important details like dates, statistics, and key findings.
-6. Present a balanced view without injecting your own opinions.
-7. Use bullet points for clarity where appropriate.
-8. IMPORTANT: Include relevant source links in your summary, especially for articles or newsletter web versions.
-9. Format the links in a way that will be clickable in an HTML email (use markdown style links like [Title](URL)).
-10. For each major topic or article you summarize, try to include a relevant link where the reader can learn more.
+1. MOST IMPORTANT: Be thorough and comprehensive - include ALL meaningful content, stories, and insights from the source material.
+2. Do not omit any significant articles, stories or topics from the newsletters.
+3. Focus on factual information and key insights.
+4. Remove any redundancy or duplicate information across different sources.
+5. Organize information by topic, not by source.
+6. Remove any content that appears to be advertising or sponsored.
+7. Include important details like dates, statistics, and key findings.
+8. Present a balanced view without injecting your own opinions.
+9. Use bullet points for clarity where appropriate.
+10. For EACH article or story from the newsletters, include a brief summary - don't skip any articles.
+11. Include relevant source links for all articles (use markdown style links like [Title](URL)).
+12. Use section headers to organize the summary by topic areas.
+13. If you find yourself omitting content due to length, create a separate "Additional Stories" section rather than leaving items out completely.
 
-The summary should be comprehensive yet concise, focusing on the most important information.
+The summary should be thorough and detailed, prioritizing completeness over brevity.
 Make sure to maintain all web links so readers can dive deeper into topics they find interesting.
 
 CONTENT TO SUMMARIZE:
 {content}
 
-Please provide a well-structured summary of the above content, organized by topic and including relevant source links.
+Please provide a detailed and comprehensive summary of the above content, organized by topic and including ALL significant stories and articles with their relevant source links.
 """
         return prompt
     

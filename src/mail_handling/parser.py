@@ -179,7 +179,7 @@ class EmailParser:
             return []
     
     def _clean_html(self, html_content):
-        """Clean HTML content by removing scripts, styles, etc."""
+        """Clean HTML content by removing scripts, styles, etc. while preserving important content."""
         try:
             # Ensure content is a string
             if not isinstance(html_content, str):
@@ -194,17 +194,23 @@ class EmailParser:
             # Parse with BeautifulSoup
             soup = BeautifulSoup(html_content, 'html.parser')
             
-            # Remove unwanted tags
-            for tag in soup(['script', 'style', 'meta', 'link', 'head']):
+            # Remove definitely unwanted tags that don't contain content
+            for tag in soup(['script', 'style', 'meta', 'link']):
                 tag.decompose()
             
-            # Clean up email-specific elements that might contain non-content
-            for tag in soup.find_all(class_=lambda x: x and ('footer' in x.lower() or 'header' in x.lower())):
+            # Instead of removing header/footer elements, look for specific non-content indicators
+            # This is more conservative to avoid removing important content
+            for tag in soup.find_all(class_=lambda x: x and any(term in x.lower() for term in 
+                                                             ['unsubscribe', 'disclaimer', 'preference-center'])):
                 tag.decompose()
                 
-            # Clean up marketing elements
-            for tag in soup.find_all(class_=lambda x: x and ('marketing' in x.lower() or 'promotion' in x.lower())):
+            # Be more selective with marketing elements to avoid removing actual content
+            marketing_terms = ['advertisement', 'sponsor', 'promotion', 'marketing-banner']
+            for tag in soup.find_all(class_=lambda x: x and any(term in x.lower() for term in marketing_terms)):
                 tag.decompose()
+            
+            # Save a copy of the original soup after basic cleaning for fallback
+            cleaned_soup = str(soup)
                 
             # Handle Gmail's specific forwarded email format
             if is_forwarded:
@@ -247,14 +253,29 @@ class EmailParser:
                     clean_html = str(main_content)
                 else:
                     logger.debug("Could not identify main content section in forwarded email")
-                    clean_html = str(soup)
+                    clean_html = cleaned_soup
             else:
-                clean_html = str(soup)
+                # For non-forwarded emails, preserve more content
+                # Check if there's a specific newsletter content area
+                newsletter_content = None
+                
+                # Look for common newsletter content containers
+                content_containers = soup.find_all(['div', 'table'], class_=lambda x: x and 
+                                                  any(term in (x.lower() if x else '') for term in 
+                                                      ['content', 'body', 'article', 'main', 'newsletter']))
+                
+                if content_containers:
+                    # Use the largest content container
+                    newsletter_content = max(content_containers, key=lambda x: len(str(x)))
+                
+                if newsletter_content and len(str(newsletter_content)) > len(cleaned_soup) * 0.4:  # At least 40% of original
+                    clean_html = str(newsletter_content)
+                    logger.debug(f"Using extracted newsletter content, size: {len(clean_html)}")
+                else:
+                    # If no suitable content container found, use the entire document
+                    clean_html = cleaned_soup
+                    logger.debug("Using entire document as content (no specific content area found)")
             
-            # Log content length
-            logger.debug(f"Cleaned HTML content length: {len(clean_html)}")
-            
-            # Return the cleaned HTML
             return clean_html
             
         except Exception as e:
