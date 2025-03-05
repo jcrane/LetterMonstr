@@ -161,9 +161,13 @@ class ContentProcessor:
             return None
     
     def _deduplicate_content(self, items):
-        """Remove duplicate content across items."""
+        """Remove duplicate content across items while preserving unique articles."""
         if not items:
             return []
+        
+        # Make the similarity threshold more strict to avoid over-merging
+        original_threshold = self.similarity_threshold
+        self.similarity_threshold = 0.85  # Increased from 0.7 to be more conservative
         
         # Create groups of similar content
         content_groups = []
@@ -191,6 +195,10 @@ class ContentProcessor:
                 # Only one item in group, no deduplication needed
                 deduplicated_items.append(group[0])
             else:
+                # Log that we're merging items
+                sources = [item['source'] for item in group]
+                logger.info(f"Merging similar content from sources: {sources}")
+                
                 # Find the most comprehensive item (longest content)
                 most_comprehensive = max(group, key=lambda x: len(x['content']))
                 
@@ -217,6 +225,12 @@ class ContentProcessor:
                 merged_item['is_merged'] = True
                 
                 deduplicated_items.append(merged_item)
+        
+        # Restore original threshold
+        self.similarity_threshold = original_threshold
+        
+        # Log metrics about deduplication
+        logger.info(f"Deduplication: {len(items)} original items -> {len(deduplicated_items)} deduplicated items")
         
         return deduplicated_items
     
