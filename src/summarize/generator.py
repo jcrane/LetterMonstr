@@ -57,10 +57,34 @@ class SummaryGenerator:
             return "Error generating summary. Please check logs for details."
     
     def _prepare_content_for_summary(self, processed_content):
-        """Prepare content for summarization."""
+        """Prepare content for summarization with intelligent token management."""
         formatted_content = []
         
-        # Add each content item
+        # Estimate tokens per character (approximation)
+        tokens_per_char = 0.25  # A rough estimate: ~4 characters per token for English
+        
+        # Target maximum tokens for the content portion (leaving room for instructions and other parts)
+        max_content_tokens = 180000  # Approximately 180K tokens for Claude 3.7 Sonnet
+        
+        # Reserve tokens for instructions and overhead
+        reserved_tokens = 20000  # Reserve 20K tokens for instructions and other parts
+        
+        # Available tokens for content
+        available_tokens = max_content_tokens - reserved_tokens
+        
+        # Estimate total content size
+        total_chars = sum(len(item.get('content', '')) for item in processed_content)
+        estimated_tokens = total_chars * tokens_per_char
+        
+        logger.info(f"Estimated content size: {total_chars} chars, ~{int(estimated_tokens)} tokens")
+        
+        # Calculate scaling factor if we need to reduce content
+        scaling_factor = 1.0
+        if estimated_tokens > available_tokens:
+            scaling_factor = available_tokens / estimated_tokens
+            logger.warning(f"Content too large, scaling down to {scaling_factor:.2f} of original size")
+        
+        # Add each content item with scaled sizes
         for item in processed_content:
             # Format basic item information
             item_text = f"SOURCE: {item.get('source', 'Unknown')}\n"
@@ -98,16 +122,24 @@ class SummaryGenerator:
             if item.get('is_merged', False) and 'sources' in item:
                 item_text += f"MERGED FROM SOURCES: {', '.join(item['sources'])}\n\n"
             
-            # Add main content
-            # If the content is very long, we'll truncate it to not exceed token limits
+            # Add main content with intelligent size management
             content = item.get('content', '')
-            # Increase the character limit to capture more content (Claude 3.7 has a large context window)
-            max_content_chars = 50000  # Increased from 15000 to capture more content
-            if len(content) > max_content_chars:
-                # More intelligent truncation - try to keep the beginning and important sections
-                first_part = content[:max_content_chars // 2]  # Keep the first half
-                second_part = content[-(max_content_chars // 2):]  # Keep the last half
-                content = first_part + "\n\n[...CONTENT ABBREVIATED...]\n\n" + second_part
+            content_size = len(content)
+            
+            # Calculate maximum allowed size for this content based on scaling
+            if scaling_factor < 1.0:
+                # Scale down content size based on its proportion of the total
+                max_content_chars = int(content_size * scaling_factor)
+                
+                # Ensure minimum reasonable size
+                max_content_chars = max(3000, max_content_chars)
+                
+                if content_size > max_content_chars:
+                    # Intelligent truncation - include beginning and end
+                    first_portion = content[:max_content_chars // 2]
+                    second_portion = content[-(max_content_chars // 2):]
+                    content = first_portion + "\n\n[...CONTENT ABBREVIATED...]\n\n" + second_portion
+                    logger.debug(f"Truncated content for '{item.get('source', 'Unknown')}' from {content_size} to {len(content)} chars")
             
             item_text += f"CONTENT:\n{content}\n\n"
             
@@ -115,7 +147,14 @@ class SummaryGenerator:
             formatted_content.append(item_text)
         
         # Join all items with a separator
-        return "\n\n" + "-" * 50 + "\n\n".join(formatted_content)
+        final_content = "\n\n" + "-" * 50 + "\n\n".join(formatted_content)
+        
+        # Final safety check
+        final_size = len(final_content)
+        final_tokens = int(final_size * tokens_per_char)
+        logger.info(f"Final prepared content: {final_size} chars, ~{final_tokens} tokens")
+        
+        return final_content
     
     def _create_summary_prompt(self, content):
         """Create a prompt for Claude to generate a summary."""
@@ -223,4 +262,68 @@ Please provide a detailed and comprehensive summary of the above content, organi
                 session.close()
                 
         except Exception as e:
-            logger.error(f"Error in _store_summary: {e}", exc_info=True) 
+            logger.error(f"Error in _store_summary: {e}", exc_info=True)
+            
+    def combine_summaries(self, summaries):
+        """Combine multiple summaries into one comprehensive summary."""
+        if not summaries:
+            return ""
+        
+        if len(summaries) == 1:
+            return summaries[0]
+        
+        # Create a prompt to combine the summaries
+        combined_prompt = f"""
+You are a newsletter summarization assistant for the LetterMonstr application.
+Your task is to combine multiple newsletter summaries into one comprehensive summary.
+
+The summaries below are from different batches of newsletters that have been processed separately.
+Please combine these summaries into a single coherent summary that:
+
+1. Eliminates redundancy between the different summaries
+2. Organizes information by topic, not by summary batch
+3. Preserves all important information from each summary
+4. Maintains a clear structure with section headers
+5. Keeps all relevant links
+6. Improves the overall flow and readability
+
+SUMMARIES TO COMBINE:
+
+{'==='*20}
+{summaries[0]}
+{'==='*20}
+
+{'==='*20}
+{summaries[1]}
+{'==='*20}
+
+"""
+        
+        # If there are more than 2 summaries, add them with separators
+        if len(summaries) > 2:
+            for i in range(2, len(summaries)):
+                combined_prompt += f"""
+{'==='*20}
+{summaries[i]}
+{'==='*20}
+
+"""
+        
+        # Complete the prompt
+        combined_prompt += """
+Please provide a single comprehensive and well-organized summary that combines all of the above information,
+eliminating redundancy while preserving all significant content and links.
+"""
+        
+        try:
+            # Call Claude API
+            logger.info(f"Combining {len(summaries)} summaries into one")
+            combined_summary = self._call_claude_api(combined_prompt)
+            return combined_summary
+        except Exception as e:
+            logger.error(f"Error combining summaries: {e}", exc_info=True)
+            # Fallback: just join them with section headers
+            fallback = "# COMBINED NEWSLETTER SUMMARY\n\n"
+            for i, summary in enumerate(summaries):
+                fallback += f"## Batch {i+1} Summary\n\n{summary}\n\n---\n\n"
+            return fallback 
