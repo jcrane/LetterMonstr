@@ -83,7 +83,30 @@ class Summary(Base):
     creation_date = Column(DateTime, default=datetime.now)
     sent = Column(Boolean, default=False)
     sent_date = Column(DateTime, nullable=True)
+
+class ProcessedContent(Base):
+    """Model for storing content that has been processed but not yet summarized."""
+    __tablename__ = 'processed_content'
     
+    id = Column(Integer, primary_key=True)
+    content_hash = Column(String(64), index=True, unique=True)  # For deduplication
+    email_id = Column(Integer, ForeignKey('processed_emails.id'), nullable=True)
+    source = Column(String(255))  # Where the content came from (email subject, URL, etc.)
+    content_type = Column(String(50))  # 'email', 'crawled', 'combined', etc.
+    raw_content = Column(Text)  # Original content
+    processed_content = Column(Text)  # Processed and cleaned content
+    content_metadata = Column(Text)  # Store additional metadata as JSON
+    date_processed = Column(DateTime, default=datetime.now)
+    summarized = Column(Boolean, default=False)  # Whether it's been included in a summary
+    summary_id = Column(Integer, ForeignKey('summaries.id'), nullable=True)  # Which summary included this content
+    
+    # Relationships
+    email = relationship("ProcessedEmail", foreign_keys=[email_id])
+    summary = relationship("Summary", foreign_keys=[summary_id])
+    
+    def __repr__(self):
+        return f"<ProcessedContent(id={self.id}, source='{self.source}', summarized={self.summarized})>"
+
 def init_db(db_path):
     """Initialize the database."""
     # Ensure data directory exists

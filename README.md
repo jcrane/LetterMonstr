@@ -28,6 +28,77 @@ To run LetterMonstr in a production server environment, you would need to make y
 - Effectively handles forwarded newsletters from Gmail
 - Summarizes content using Claude 3.7 Sonnet LLM
 - Delivers summaries at configurable intervals (daily, weekly, or monthly)
+- **NEW**: Supports periodic email fetching throughout the day for improved reliability and performance
+
+## Periodic Email Fetching
+
+LetterMonstr supports periodic email fetching throughout the day, which can significantly improve overall processing time and reliability.
+
+### How It Works
+
+1. **Periodic Fetching**: Instead of fetching all emails at once at the scheduled time, LetterMonstr can fetch and process emails periodically (e.g., every hour) throughout the day.
+2. **Incremental Processing**: Each fetch processes only new emails since the last fetch, spreading the processing load.
+3. **Final Summary**: At the scheduled delivery time, all processed content is combined, summarized, and sent as your regular newsletter digest.
+
+### Benefits
+
+- **Faster Processing**: The final summary generation is much faster since individual emails are already processed.
+- **More Reliable**: Less likely to hit API rate limits or timeouts by distributing processing throughout the day.
+- **Up-to-date Summaries**: Content is processed closer to when it arrives rather than all at once.
+- **Better Deduplication**: Content is properly deduplicated across all fetched emails.
+
+### Setup
+
+1. Enable periodic fetching in your configuration:
+
+```yaml
+email:
+  # ... your existing email settings ...
+  periodic_fetch: true
+  fetch_interval_hours: 1  # Run every hour
+  mark_read_after_summarization: true  # Only mark emails as read after summary is sent
+```
+
+1. Run LetterMonstr using the standard runner script:
+
+```bash
+./run_lettermonstr.sh
+```
+
+The script will automatically detect your configuration and start in the appropriate mode.
+
+### How Operating Modes Work
+
+LetterMonstr now supports two operating modes that are automatically selected based on your configuration:
+
+1. **Traditional Mode** (default): All emails are fetched and processed at the scheduled delivery time.
+2. **Periodic Mode**: Emails are fetched and processed throughout the day, with summaries generated at the scheduled time.
+
+The `run_lettermonstr.sh` script detects which mode to use by checking your configuration file. There's no need to use different commands for different modes - the system adapts automatically.
+
+### Configuration Options
+
+- `periodic_fetch`: Enable/disable periodic fetching (default: false)
+- `fetch_interval_hours`: How often to fetch emails in hours (default: 1)
+- `mark_read_after_summarization`: Whether to mark emails as read only after summarization (default: true)
+
+### Database Changes
+
+The system now uses a new `ProcessedContent` table to track content that has been processed but not yet summarized. This ensures proper deduplication and tracking across multiple fetches.
+
+A database migration script (`db_migrate.py`) is automatically run when starting the application to ensure your database schema is up to date.
+
+## Useful Commands
+
+LetterMonstr provides several useful scripts to manage and interact with the system:
+
+- **Start the service**: `./run_lettermonstr.sh` (automatically runs in the appropriate mode)
+- **Check status**: `./status_lettermonstr.sh` (shows status of either periodic or traditional process)
+- **Stop the service**: `./stop_lettermonstr.sh` (stops all running LetterMonstr processes)
+- **View latest summary**: `./view_latest_summary.sh`
+- **Send pending summaries**: `python src/send_pending_summaries.py [summary_id]`
+- **Force process unread emails**: `python src/force_process_unread.py`
+- **Generate a test newsletter**: `python test_newsletter.py`
 
 ## Requirements
 
@@ -36,8 +107,18 @@ To run LetterMonstr in a production server environment, you would need to make y
 - Gmail account for receiving newsletters
 - Gmail App Password (requires 2-Step Verification to be enabled)
 - Anthropic API key for Claude access
+- Required packages (install via `pip install -r requirements.txt`):
+  - pyyaml
+  - schedule
+  - sqlalchemy
+  - python-dotenv
+  - beautifulsoup4
+  - requests
+  - anthropic
+  - langchain
+  - langchain-community
 
-## Setup
+## Installation
 
 1. Clone this repository
 2. Create a virtual environment:
@@ -67,7 +148,7 @@ To run LetterMonstr in a production server environment, you would need to make y
 5. Run the application:
 
    ```bash
-   python3 src/main.py
+   ./run_lettermonstr.sh
    ```
 
 ## Running as a Service
@@ -86,6 +167,8 @@ This script:
 
 - Activates the virtual environment (creates it if needed)
 - Checks if configuration exists (runs setup if needed)
+- Runs database migrations if needed
+- Detects whether to use periodic or traditional mode based on your configuration
 - Starts LetterMonstr as a background process
 - Saves the process ID for management
 
@@ -99,17 +182,20 @@ To check if LetterMonstr is running and view recent logs:
 
 This shows:
 
+- Which mode is enabled (periodic or traditional)
 - Process status and details
-- Recent log entries
-- Database statistics (if SQLite is available)
+- Recent log entries for the active process
+- Database statistics, including processed content items and unsummarized content
 
 ### Stopping the Service
 
-To stop the LetterMonstr service:
+To stop all LetterMonstr processes:
 
 ```bash
 ./stop_lettermonstr.sh
 ```
+
+This will gracefully shut down both the traditional and periodic processes if they're running.
 
 ### Viewing Summaries
 
@@ -139,7 +225,7 @@ This will display:
 For testing the application without waiting for real newsletters, use the test newsletter generator:
 
 ```bash
-./test_newsletter.py
+python test_newsletter.py
 ```
 
 This script:
@@ -148,7 +234,7 @@ This script:
 - Sends it to your configured Gmail account
 - Includes test elements like sponsored content for ad filtering tests
 
-The test newsletter will be processed during the next application cycle, or you can manually trigger processing by running `python3 src/main.py`.
+The test newsletter will be processed during the next application cycle, or you can manually trigger processing by running the force processing script: `python src/force_process_unread.py`.
 
 ## Configuration
 
@@ -166,6 +252,8 @@ Key configuration options include:
   - Gmail account credentials
   - IMAP server settings
   - Initial email lookback period
+  - Periodic fetching options
+  - Email marking behavior
 
 - **Content Processing**:
   - Link crawling depth and limits
@@ -193,21 +281,27 @@ You can customize the summaries generated by LetterMonstr by modifying:
 
 ```text
 lettermonstr/
-├── config/           # Configuration files
-│   ├── config.yaml   # Your personal configuration (gitignored)
+├── config/                # Configuration files
+│   ├── config.yaml        # Your personal configuration (gitignored)
 │   └── config.template.yaml  # Template for reference
-├── data/             # Storage for processed content
-├── src/              # Source code
-│   ├── email/        # Email fetching and processing
-│   ├── crawl/        # Web crawling components
-│   ├── summarize/    # LLM summarization logic
-│   └── scheduler/    # Scheduling components
-├── run_lettermonstr.sh  # Script to run as background service
+├── data/                  # Storage for processed content
+├── src/                   # Source code
+│   ├── mail_handling/     # Email fetching and processing
+│   ├── crawl/             # Web crawling components
+│   ├── summarize/         # LLM summarization logic
+│   ├── database/          # Database models and functions
+│   ├── main.py            # Traditional main application
+│   ├── periodic_runner.py # Periodic fetching process
+│   ├── fetch_process.py   # Email fetching and processing logic
+│   ├── db_migrate.py      # Database migration script
+│   └── force_process_unread.py # Script to force process emails
+├── run_lettermonstr.sh    # Script to run as background service (any mode)
 ├── status_lettermonstr.sh # Script to check service status
-├── stop_lettermonstr.sh  # Script to stop the service
+├── stop_lettermonstr.sh   # Script to stop the service
 ├── view_latest_summary.sh # Script to view recent summaries
-├── test_newsletter.py # Script to generate test newsletters
-└── tests/            # Test files
+├── send_pending_summaries.py # Script to send unsent summaries
+├── test_newsletter.py     # Script to generate test newsletters
+└── requirements.txt       # Python package requirements
 ```
 
 ## Gmail Setup
@@ -275,6 +369,8 @@ Alternatively, you can manually edit the `config/config.yaml` file to update the
 email:
   fetch_email: "your-newsletter-email@example.com"
   password: "your-app-password"
+  periodic_fetch: true  # Enable periodic fetching
+  fetch_interval_hours: 1
   # other email settings...
 
 llm:
@@ -285,34 +381,47 @@ llm:
 ## Usage
 
 1. Subscribe to newsletters using your configured Gmail account
-2. LetterMonstr will automatically fetch and process unread newsletters
-3. Newsletters are marked as read in Gmail after successful processing
-4. Summaries will be delivered to your specified email address at the configured frequency
-5. Click on source links in the summary to read full articles on topics of interest
-6. You can view summaries directly using `./view_latest_summary.sh`
-7. For testing, send a simulated newsletter using `./test_newsletter.py`
+2. Run LetterMonstr using `./run_lettermonstr.sh`
+3. The system will automatically:
+   - If in periodic mode: Fetch and process emails throughout the day
+   - If in traditional mode: Fetch and process emails at the scheduled time
+4. Newsletters are marked as read in Gmail after successful processing (or after summary is sent, depending on your configuration)
+5. Summaries will be delivered to your specified email address at the configured frequency
+6. Click on source links in the summary to read full articles on topics of interest
+7. You can view summaries directly using `./view_latest_summary.sh`
+8. For testing, send a simulated newsletter using `python test_newsletter.py`
 
 ## Recent Improvements
 
 Recent updates to LetterMonstr include:
 
-1. **Source Links**: Summaries now include clickable links to the original articles and web versions of newsletters, allowing you to dive deeper into topics of interest
-2. **Gmail Integration**: The app now processes unread emails and marks them as read after successful processing
-3. **Improved Content Extraction**: Better handling of forwarded newsletters from Gmail
-4. **Enhanced HTML Parsing**: More reliable extraction of content from complex HTML newsletters
-5. **Database Optimization**: Better tracking of processed emails to prevent duplication
+1. **Periodic Email Fetching**: Emails can now be fetched and processed throughout the day for improved reliability
+2. **Unified Running Script**: Single `run_lettermonstr.sh` script that adapts to your configuration
+3. **Enhanced Status & Monitoring**: Improved status script showing more details about the running process and database
+4. **Database Migrations**: Automatic database schema updates to support new features
+5. **Source Links**: Summaries include clickable links to the original articles and web versions of newsletters
+6. **Gmail Integration**: Processes unread emails and marks them as read after successful processing
+7. **Improved Content Extraction**: Better handling of forwarded newsletters from Gmail
 
 ## Troubleshooting
 
 If you encounter issues:
 
-1. Check the application logs in `data/lettermonstr.log`
-2. Ensure you're running on a supported macOS version (10.15 Catalina or later)
-3. Verify that Python 3.9+ is installed and accessible via `python3` command
-4. Check that your Gmail App Password is correct and 2-Step Verification is enabled
-5. Verify that your Anthropic API key is valid and has sufficient credits
-6. Make sure all dependencies are installed correctly with `pip3 install -r requirements.txt`
-7. If the application crashes or fails to process emails, try restarting it
+1. Check the application logs:
+   - Traditional mode: `data/lettermonstr.log` and `data/lettermonstr_runner.log`
+   - Periodic mode: `data/lettermonstr_periodic.log` and `data/lettermonstr_periodic_runner.log`
+2. Run `./status_lettermonstr.sh` to see process status and database information
+3. Ensure you're running on a supported macOS version (10.15 Catalina or later)
+4. Verify that Python 3.9+ is installed and accessible via `python3` command
+5. Check that your Gmail App Password is correct and 2-Step Verification is enabled
+6. Verify that your Anthropic API key is valid and has sufficient credits
+7. Make sure all dependencies are installed correctly with `pip3 install -r requirements.txt`
+8. If the application crashes or fails to process emails, try stopping and restarting it:
+
+   ```bash
+   ./stop_lettermonstr.sh
+   ./run_lettermonstr.sh
+   ```
 
 ### Running on Servers (Unsupported)
 

@@ -9,8 +9,9 @@ import logging
 import os
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
+from datetime import datetime
 
-from src.database.models import get_session, EmailContent, Link
+from src.database.models import get_session, EmailContent, Link, ProcessedEmail
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +188,13 @@ class EmailParser:
             
             # Check for common Gmail forwarded email markers
             is_forwarded = False
-            if "---------- Forwarded message ---------" in html_content:
+            # Check if forwarded flag is in the current email data
+            email_data = getattr(self, 'current_email_data', {})
+            if email_data.get('is_forwarded', False):
+                is_forwarded = True
+                logger.debug("Detected forwarded email from email data flag")
+            # Also check for the marker in the content itself
+            elif "---------- Forwarded message ---------" in html_content:
                 is_forwarded = True
                 logger.debug("Detected Gmail forwarded message marker in HTML")
             
@@ -225,6 +232,7 @@ class EmailParser:
                 for div in soup.find_all('div', class_=lambda x: x and ('content' in x.lower())):
                     if len(str(div)) > 200:  # Arbitrary size threshold for meaningful content
                         main_content = div
+                        logger.debug("Found main content div with 'content' in class name")
                         break
                 
                 # Strategy 2: Look for largest div after the forwarded marker
@@ -238,14 +246,25 @@ class EmailParser:
                             largest_div = max(next_divs, key=lambda x: len(str(x)))
                             if len(str(largest_div)) > 200:
                                 main_content = largest_div
+                                logger.debug("Found main content div after forwarded marker")
                 
-                # Strategy 3: Look for the largest div overall
+                # Strategy 3: Look for blockquote which often contains the forwarded content
+                if not main_content:
+                    blockquotes = soup.find_all('blockquote')
+                    if blockquotes:
+                        largest_blockquote = max(blockquotes, key=lambda x: len(str(x)))
+                        if len(str(largest_blockquote)) > 200:
+                            main_content = largest_blockquote
+                            logger.debug("Found main content in blockquote")
+                
+                # Strategy 4: Look for the largest div overall
                 if not main_content:
                     divs = soup.find_all('div')
                     if divs:
                         largest_div = max(divs, key=lambda x: len(str(x)))
                         if len(str(largest_div)) > 200:
                             main_content = largest_div
+                            logger.debug("Found main content using largest div strategy")
                 
                 # If we found a main content section, use that instead of the whole document
                 if main_content:
@@ -310,6 +329,26 @@ class EmailParser:
             
             if email:
                 return email.id
+                
+            # Special handling for forwarded emails which might not be in the database yet
+            if email_data and 'subject' in email_data and email_data['subject'].startswith('Fwd:'):
+                # For forwarded emails, we need to create a ProcessedEmail record first
+                logger.info(f"Creating new ProcessedEmail record for forwarded email: {email_data['subject']}")
+                try:
+                    new_email = ProcessedEmail(
+                        message_id=message_id,
+                        subject=email_data.get('subject', ''),
+                        sender=email_data.get('sender', ''),
+                        date_received=email_data.get('date', datetime.now()),
+                        date_processed=datetime.now()
+                    )
+                    session.add(new_email)
+                    session.flush()  # Get ID without committing
+                    logger.info(f"Created ProcessedEmail record with ID {new_email.id}")
+                    return new_email.id
+                except Exception as e:
+                    logger.error(f"Failed to create ProcessedEmail record: {e}")
+                    # Continue with normal flow
             
             logger.warning(f"Could not find email ID for message: {message_id}")
             return None

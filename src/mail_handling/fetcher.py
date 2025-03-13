@@ -10,20 +10,21 @@ import os
 import sys
 from datetime import datetime, timedelta
 
-# Import standard library email modules with explicit imports
-import email as email_lib
-from email.header import decode_header
-
 # Add the project root to the Python path for imports
 current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
+# Reset sys.path to ensure standard library is first
+sys_paths = [p for p in sys.path if p not in (current_dir, project_root)]
+sys.path = sys_paths + [project_root, current_dir]
+
+# Import standard library email modules with explicit imports
+import email as email_lib
+from email.header import decode_header
+
 # Import database models
-try:
-    from src.database.models import get_session, ProcessedEmail
-except ImportError as e:
-    raise ImportError(f"Could not import database models: {e}. Please ensure SQLAlchemy is installed.")
+from src.database.models import get_session, ProcessedEmail
 
 logger = logging.getLogger(__name__)
 
