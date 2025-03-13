@@ -43,7 +43,7 @@ except ImportError:
 
 # Database imports
 try:
-    from src.database.models import init_db, get_session, ProcessedEmail
+    from src.database.models import init_db, get_session, ProcessedEmail, Summary
 except ImportError as e:
     print(f"Error: Database module is missing: {e}")
     print("  pip install sqlalchemy")
@@ -250,7 +250,28 @@ def process_newsletters():
                         email_fetcher.mark_emails_as_processed(all_successfully_processed)
                         logger.info(f"Marked {len(all_successfully_processed)} emails as processed")
                 else:
+                    # Save the summary for later sending but don't mark emails as read
                     logger.info("Not sending summary yet - waiting for scheduled delivery time")
+                    try:
+                        db_path = os.path.join('data', 'lettermonstr.db')
+                        session = get_session(db_path)
+                        
+                        # Save summary to database
+                        summary = Summary(
+                            summary_type=config['summary']['frequency'],
+                            summary_text=combined_summary,
+                            creation_date=datetime.now(),
+                            sent=False
+                        )
+                        session.add(summary)
+                        session.commit()
+                        summary_id = summary.id
+                        session.close()
+                        
+                        logger.info(f"Summary saved to database with ID: {summary_id} for later sending")
+                        logger.info("Emails will remain unread until the summary is sent")
+                    except Exception as e:
+                        logger.error(f"Error saving summary to database: {e}", exc_info=True)
             else:
                 logger.warning("No summaries were generated from any batch")
         else:
@@ -273,15 +294,25 @@ def should_send_summary():
     """Determine if it's time to send a summary based on configuration."""
     current_time = datetime.now()
     frequency = config['summary']['frequency']
+    delivery_time_str = config['summary']['delivery_time']
     
+    # Parse delivery time
+    delivery_hour, delivery_minute = map(int, delivery_time_str.split(':'))
+    
+    # Check if we're at or past the delivery time
+    time_check = (current_time.hour > delivery_hour) or \
+                 (current_time.hour == delivery_hour and current_time.minute >= delivery_minute)
+    
+    # Check if it's the right day based on frequency
     if frequency == 'daily':
-        return True
+        return time_check
     elif frequency == 'weekly':
         delivery_day = config['summary']['weekly_day']
-        return current_time.weekday() == delivery_day
+        return current_time.weekday() == delivery_day and time_check
     elif frequency == 'monthly':
         delivery_day = config['summary']['monthly_day']
-        return current_time.day == delivery_day
+        return current_time.day == delivery_day and time_check
+    
     return False
 
 def schedule_jobs():

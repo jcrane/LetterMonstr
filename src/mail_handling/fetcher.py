@@ -132,6 +132,74 @@ class EmailFetcher:
         finally:
             session.close()
     
+    def fetch_raw_unread_emails(self):
+        """Fetch ALL unread emails, ignoring database processed status.
+        
+        This method is similar to fetch_new_emails but it ignores the database check
+        for processed emails. This is useful for forcing processing of emails that
+        were incorrectly marked as processed.
+        """
+        mail = self.connect()
+        
+        all_emails = []
+        
+        try:
+            # Calculate the date for the lookback period
+            since_date = (datetime.now() - timedelta(days=self.lookback_days)).strftime("%d-%b-%Y")
+            
+            # Process each folder
+            for folder in self.folders:
+                # Select the mailbox/folder
+                mail.select(folder)
+                
+                # Search for unread emails within the lookback period
+                # Use UNSEEN flag to only get unread emails
+                status, messages = mail.search(None, f'(UNSEEN SINCE {since_date})')
+                
+                if status != 'OK':
+                    logger.warning(f"Failed to search folder {folder}: {messages}")
+                    continue
+                
+                # Get the list of email IDs
+                email_ids = messages[0].split()
+                
+                if not email_ids:
+                    logger.info(f"No unread emails found in folder {folder} since {since_date}")
+                    continue
+                
+                logger.info(f"Found {len(email_ids)} unread emails in folder {folder}")
+                
+                # Process each email
+                for e_id in email_ids:
+                    # Fetch the email
+                    status, msg_data = mail.fetch(e_id, '(RFC822)')
+                    
+                    if status != 'OK':
+                        logger.warning(f"Failed to fetch email {e_id}: {msg_data}")
+                        continue
+                    
+                    # Parse the email message
+                    msg = email_lib.message_from_bytes(msg_data[0][1])
+                    
+                    # Process the email without checking the database
+                    parsed_email = self._parse_email(msg)
+                    
+                    if parsed_email:
+                        # Add to the list of emails to process
+                        all_emails.append(parsed_email)
+            
+            # Close the connection
+            mail.close()
+            mail.logout()
+            
+            # Return the list of fetched emails
+            logger.info(f"Successfully fetched {len(all_emails)} raw unread emails")
+            return all_emails
+            
+        except Exception as e:
+            logger.error(f"Error fetching raw emails: {e}", exc_info=True)
+            raise
+    
     def mark_emails_as_processed(self, processed_emails):
         """Mark emails as processed in both Gmail and the database."""
         if not processed_emails:
