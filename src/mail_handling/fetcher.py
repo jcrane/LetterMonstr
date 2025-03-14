@@ -11,19 +11,13 @@ import sys
 from datetime import datetime, timedelta
 import socket
 import time
+import email as email_lib
+from email.header import decode_header
 
 # Add the project root to the Python path for imports
 current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
-
-# Reset sys.path to ensure standard library is first
-sys_paths = [p for p in sys.path if p not in (current_dir, project_root)]
-sys.path = sys_paths + [project_root, current_dir]
-
-# Import standard library email modules with explicit imports
-import email as email_lib
-from email.header import decode_header
 
 # Import database models
 from src.database.models import get_session, ProcessedEmail
@@ -424,43 +418,82 @@ class EmailFetcher:
                 try:
                     soup = BeautifulSoup(content['html'], 'html.parser')
                     
-                    # Look for Gmail forwarded content markers
+                    # Look for common forwarded content markers from different email clients
+                    # 1. Gmail forwarded message marker
+                    found_content = False
+                    
+                    # Method 1: Look for Gmail forwarded message marker
                     fw_marker = soup.find(string=lambda s: s and "---------- Forwarded message ---------" in s)
                     
                     if fw_marker:
-                        logger.debug("Found forwarded message marker in HTML")
+                        logger.debug("Found Gmail forwarded message marker in HTML")
                         
                         # Try to find the actual forwarded content
                         parent = fw_marker.parent
                         if parent:
-                            # Method 1: Try to find largest div after the marker
+                            # Try to find largest div after the marker
                             main_content_div = None
                             divs_after_marker = parent.find_next_siblings('div')
                             if divs_after_marker:
                                 largest_div = max(divs_after_marker, key=lambda x: len(str(x)))
                                 if len(str(largest_div)) > 200:  # Arbitrary size threshold
                                     main_content_div = largest_div
-                                    logger.debug(f"Found main content div after marker, size: {len(str(main_content_div))}")
-                            
-                            # Method 2: Try to find a blockquote which often contains the forwarded content
-                            if not main_content_div:
-                                blockquotes = soup.find_all('blockquote')
-                                if blockquotes:
-                                    largest_blockquote = max(blockquotes, key=lambda x: len(str(x)))
-                                    if len(str(largest_blockquote)) > 200:
-                                        main_content_div = largest_blockquote
-                                        logger.debug(f"Found main content in blockquote, size: {len(str(main_content_div))}")
-                            
-                            # If we found the main content, update the HTML content
-                            if main_content_div:
-                                content['html'] = str(main_content_div)
-                                logger.debug(f"Updated HTML content from forwarded email, new size: {len(content['html'])}")
+                                    logger.debug(f"Found main content div after Gmail marker, size: {len(str(main_content_div))}")
+                                    content['html'] = str(main_content_div)
+                                    found_content = True
+                    
+                    # Method 2: Look for blockquote which often contains the forwarded content in various email clients
+                    if not found_content:
+                        blockquotes = soup.find_all('blockquote')
+                        if blockquotes:
+                            largest_blockquote = max(blockquotes, key=lambda x: len(str(x)))
+                            if len(str(largest_blockquote)) > 200:  # Reasonable content size
+                                logger.debug(f"Found main content in blockquote, size: {len(str(largest_blockquote))}")
+                                content['html'] = str(largest_blockquote)
+                                found_content = True
+                    
+                    # Method 3: Look for common forwarded email client classes/IDs
+                    if not found_content:
+                        # Common class names used for email content in various clients
+                        content_classes = ['email-content', 'message-body', 'email-body', 'mailBody', 
+                                          'message-content', 'content-body', 'msg-body', 'message']
+                        
+                        for class_name in content_classes:
+                            elements = soup.find_all(class_=lambda c: c and class_name in c.lower())
+                            if elements:
+                                largest_element = max(elements, key=lambda x: len(str(x)))
+                                if len(str(largest_element)) > 200:
+                                    logger.debug(f"Found content using class name '{class_name}', size: {len(str(largest_element))}")
+                                    content['html'] = str(largest_element)
+                                    found_content = True
+                                    break
+                    
+                    # Method 4: If all else fails, try to find the largest div in the document
+                    if not found_content:
+                        divs = soup.find_all('div')
+                        if divs:
+                            # Filter out very small divs and headers/footers
+                            substantial_divs = [d for d in divs if len(str(d)) > 500]
+                            if substantial_divs:
+                                # Get the largest div
+                                largest_div = max(substantial_divs, key=lambda x: len(str(x)))
+                                logger.debug(f"Fallback to largest div in document, size: {len(str(largest_div))}")
+                                content['html'] = str(largest_div)
+                                found_content = True
+                    
+                    # Log the result of content extraction
+                    if found_content:
+                        logger.debug(f"Updated HTML content from forwarded email, new size: {len(content['html'])}")
+                    else:
+                        logger.warning("Could not find the forwarded content in the HTML structure")
+                        
                 except Exception as e:
                     logger.warning(f"Error processing forwarded HTML content: {e}")
             
-            # Final content length check
-            if len(content['html']) < 100 and len(content['text']) < 100:
-                logger.warning(f"Both HTML and text content are very short. HTML: {len(content['html'])} chars, Text: {len(content['text'])} chars")
+            # If HTML content is empty or very short but text content is available, use text content
+            if len(content.get('html', '')) < 100 and len(content.get('text', '')) > 200:
+                logger.debug("HTML content is short but text content is substantial, using text content")
+                content['html'] = f"<pre>{content['text']}</pre>"
             
             return content
             

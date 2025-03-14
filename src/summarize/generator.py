@@ -88,7 +88,20 @@ class SummaryGenerator:
         for item in processed_content:
             # Format basic item information
             item_text = f"SOURCE: {item.get('source', 'Unknown')}\n"
-            item_text += f"DATE: {item.get('date', datetime.now()).strftime('%Y-%m-%d')}\n"
+            
+            # Handle date which could be a string or datetime object
+            date_value = item.get('date', datetime.now())
+            if isinstance(date_value, str):
+                # If it's a string, just use it directly
+                item_text += f"DATE: {date_value}\n"
+            else:
+                # If it's a datetime object, format it
+                try:
+                    item_text += f"DATE: {date_value.strftime('%Y-%m-%d')}\n"
+                except Exception as e:
+                    # Fallback to current date if there's any error
+                    logger.warning(f"Error formatting date: {e}, using current date")
+                    item_text += f"DATE: {datetime.now().strftime('%Y-%m-%d')}\n"
             
             # Add source URLs if available
             email_content = item.get('original_email', {})
@@ -231,9 +244,34 @@ Please provide a detailed and comprehensive summary of the above content, organi
         """Store the generated summary in the database."""
         try:
             # Calculate period start and end dates
-            dates = [item.get('date', datetime.now()) for item in processed_content]
-            period_start = min(dates) if dates else datetime.now()
-            period_end = max(dates) if dates else datetime.now()
+            dates = []
+            for item in processed_content:
+                date_value = item.get('date', datetime.now())
+                # Convert string dates to datetime objects
+                if isinstance(date_value, str):
+                    try:
+                        # Try to parse the date string - handle different formats
+                        # First try ISO format
+                        try:
+                            date_value = datetime.fromisoformat(date_value.replace('Z', '+00:00'))
+                        except ValueError:
+                            # If that fails, try a more flexible approach
+                            import dateutil.parser
+                            date_value = dateutil.parser.parse(date_value)
+                        dates.append(date_value)
+                    except Exception as e:
+                        logger.warning(f"Could not parse date string '{date_value}': {e}")
+                        # Use current time as fallback
+                        dates.append(datetime.now())
+                else:
+                    dates.append(date_value)
+            
+            # Use current time if no valid dates found
+            if not dates:
+                period_start = period_end = datetime.now()
+            else:
+                period_start = min(dates)
+                period_end = max(dates)
             
             # Determine summary type based on timespan
             days_span = (period_end - period_start).days

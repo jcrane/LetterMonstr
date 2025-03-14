@@ -11,6 +11,8 @@ import os
 import sys
 import logging
 from datetime import datetime
+import json
+import hashlib
 
 # Set up the Python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -50,7 +52,7 @@ try:
     from src.summarize.processor import ContentProcessor
     from src.summarize.generator import SummaryGenerator
     from src.mail_handling.sender import EmailSender
-    from src.database.models import get_session, Summary, ProcessedEmail
+    from src.database.models import get_session, Summary, ProcessedEmail, ProcessedContent
 except ImportError as e:
     print(f"\nError importing required modules: {e}")
     print("Please ensure all dependencies are installed.")
@@ -207,7 +209,8 @@ def force_process_unread():
                                 summary_type="force_processed",
                                 summary_text=combined_summary,
                                 creation_date=datetime.now(),
-                                sent=False
+                                sent=False,
+                                is_forced=True  # Mark as a forced summary
                             )
                             session.add(summary)
                             session.commit()
@@ -230,7 +233,8 @@ def force_process_unread():
                         summary_type="force_processed",
                         summary_text=combined_summary,
                         creation_date=datetime.now(),
-                        sent=False
+                        sent=False,
+                        is_forced=True  # Mark as a forced summary
                     )
                     session.add(summary)
                     session.commit()

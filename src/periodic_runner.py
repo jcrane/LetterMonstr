@@ -13,6 +13,7 @@ import yaml
 import logging
 import schedule
 from datetime import datetime
+from sqlalchemy import text
 
 # Add the project root to the Python path for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -69,16 +70,39 @@ def should_send_summary(config):
                  (current_time.hour == delivery_hour and current_time.minute >= delivery_minute)
     
     # Check if it's the right day based on frequency
+    day_check = False
     if frequency == 'daily':
-        return time_check
+        day_check = True
     elif frequency == 'weekly':
         delivery_day = config['summary']['weekly_day']
-        return current_time.weekday() == delivery_day and time_check
+        day_check = current_time.weekday() == delivery_day
     elif frequency == 'monthly':
         delivery_day = config['summary']['monthly_day']
-        return current_time.day == delivery_day and time_check
+        day_check = current_time.day == delivery_day
     
-    return False
+    # If it's not the right time or day, don't send a summary
+    if not (time_check and day_check):
+        return False
+    
+    # Check if we've already sent a SCHEDULED summary today (ignore forced summaries)
+    # This ensures forced summaries don't prevent scheduled ones
+    db_path = os.path.join(project_root, 'data', 'lettermonstr.db')
+    session = get_session(db_path)
+    try:
+        # Look for summaries created today that were NOT forced and were sent
+        today_date = current_time.strftime('%Y-%m-%d')
+        already_sent_today = session.query(Summary).filter(
+            text("date(creation_date) = :today"),
+            Summary.is_forced == False,  # Only count non-forced summaries
+            Summary.sent == True
+        ).params(today=today_date).count() > 0
+        
+        return not already_sent_today  # Send if we haven't already sent a scheduled summary today
+    except Exception as e:
+        logger.error(f"Error checking for existing summaries: {e}", exc_info=True)
+        return False  # If there's an error, be cautious and don't send
+    finally:
+        session.close()
 
 def generate_and_send_summary():
     """Generate and send summary at scheduled time."""
@@ -132,8 +156,20 @@ def generate_and_send_summary():
             
             for item in unsummarized:
                 try:
-                    # Parse the JSON content
+                    # Parse the JSON content - it's stored as a string in the database
                     processed_content = item.processed_content
+                    
+                    # Parse the JSON string back into a dictionary
+                    try:
+                        import json
+                        # If the processed_content is a string, try to parse it as JSON
+                        if isinstance(processed_content, str):
+                            processed_content = json.loads(processed_content)
+                            logger.debug(f"Successfully parsed JSON from item {item.id}")
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Error parsing JSON for item {item.id}: {e}")
+                        # Skip this item if we can't parse it
+                        continue
                     
                     # Add to the list for summarization
                     all_content.append(processed_content)
@@ -160,6 +196,37 @@ def generate_and_send_summary():
                 logger.error("Failed to generate summary")
                 return
             
+            # Check if summary actually contains meaningful content
+            # Look for indication phrases that Claude uses when no content is found
+            no_content_indicators = [
+                "I don't see any actual newsletter content",
+                "no actual text",
+                "appears to be empty",
+                "content to summarize"
+            ]
+            
+            # Check if the summary just indicates there's no content
+            is_empty_summary = any(indicator in summary_text for indicator in no_content_indicators)
+            
+            # Also check if final content items have meaningful content
+            has_meaningful_content = False
+            min_content_length = 100  # Minimum characters for meaningful content
+            
+            for item in final_content:
+                content = item.get('content', '')
+                if isinstance(content, str) and len(content) > min_content_length:
+                    has_meaningful_content = True
+                    break
+            
+            if is_empty_summary or not has_meaningful_content:
+                logger.warning("Not sending summary email as there is no meaningful content to summarize")
+                # Update status but don't send email
+                for item in unsummarized:
+                    item.summarized = True
+                session.commit()
+                logger.info(f"Marked {len(unsummarized)} empty content items as summarized without sending email")
+                return
+            
             # Create summary record
             summary = Summary(
                 period_start=min(item.date_processed for item in unsummarized),
@@ -167,7 +234,8 @@ def generate_and_send_summary():
                 summary_type=config['summary']['frequency'],
                 summary_text=summary_text,
                 creation_date=datetime.now(),
-                sent=False
+                sent=False,
+                is_forced=False  # This is a scheduled summary, not forced
             )
             session.add(summary)
             session.flush()  # To get the ID

@@ -164,17 +164,40 @@ class PeriodicFetcher:
                         
                         if not parsed_content:
                             logger.warning(f"No content could be parsed from email: {email['subject']}")
-                            # Create a fallback record with minimal content for forwarded emails that fail parsing
+                            # Try to extract at least something from the raw email content instead of using a minimal placeholder
                             if is_forwarded:
-                                logger.info(f"Creating fallback content for forwarded email: {email['subject']}")
-                                # Create minimal content to ensure it's captured
-                                minimal_content = {
-                                    'id': None,
-                                    'content': f"[Forwarded email: {email['subject']}]",
-                                    'content_type': 'text',
-                                    'links': []
-                                }
-                                parsed_content = minimal_content
+                                logger.info(f"Attempting to extract raw content for forwarded email: {email['subject']}")
+                                raw_content = email.get('content', {})
+                                
+                                # Check if we have any HTML or text content in the raw content
+                                html_content = raw_content.get('html', '')
+                                text_content = raw_content.get('text', '')
+                                
+                                if len(html_content) > 200:
+                                    logger.info(f"Using raw HTML content from email, length: {len(html_content)}")
+                                    parsed_content = {
+                                        'id': None,
+                                        'content': html_content,
+                                        'content_type': 'html',
+                                        'links': []
+                                    }
+                                elif len(text_content) > 200:
+                                    logger.info(f"Using raw text content from email, length: {len(text_content)}")
+                                    parsed_content = {
+                                        'id': None,
+                                        'content': text_content,
+                                        'content_type': 'text',
+                                        'links': []
+                                    }
+                                else:
+                                    # Only as a last resort, use the placeholder
+                                    logger.warning(f"No usable content found, using placeholder for forwarded email: {email['subject']}")
+                                    parsed_content = {
+                                        'id': None,
+                                        'content': f"[Forwarded email: {email['subject']}]",
+                                        'content_type': 'text',
+                                        'links': []
+                                    }
                             else:
                                 continue
                         
@@ -398,14 +421,42 @@ def force_process_all_emails():
                 
                 if not parsed_content:
                     logger.warning(f"No content could be parsed from email: {email['subject']}")
-                    # Create a fallback record with minimal content
-                    minimal_content = {
-                        'id': None,
-                        'content': f"[Email content: {email['subject']}]",
-                        'content_type': 'text',
-                        'links': []
-                    }
-                    parsed_content = minimal_content
+                    # Try to extract at least something from the raw email content instead of using a minimal placeholder
+                    if is_forwarded:
+                        logger.info(f"Attempting to extract raw content for forwarded email: {email['subject']}")
+                        raw_content = email.get('content', {})
+                        
+                        # Check if we have any HTML or text content in the raw content
+                        html_content = raw_content.get('html', '')
+                        text_content = raw_content.get('text', '')
+                        
+                        if len(html_content) > 200:
+                            logger.info(f"Using raw HTML content from email, length: {len(html_content)}")
+                            parsed_content = {
+                                'id': None,
+                                'content': html_content,
+                                'content_type': 'html',
+                                'links': []
+                            }
+                        elif len(text_content) > 200:
+                            logger.info(f"Using raw text content from email, length: {len(text_content)}")
+                            parsed_content = {
+                                'id': None,
+                                'content': text_content,
+                                'content_type': 'text',
+                                'links': []
+                            }
+                        else:
+                            # Only as a last resort, use the placeholder
+                            logger.warning(f"No usable content found, using placeholder for forwarded email: {email['subject']}")
+                            parsed_content = {
+                                'id': None,
+                                'content': f"[Forwarded email: {email['subject']}]",
+                                'content_type': 'text',
+                                'links': []
+                            }
+                    else:
+                        continue
                 
                 # Extract and crawl links
                 links = fetcher.email_parser.extract_links(

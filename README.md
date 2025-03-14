@@ -404,11 +404,12 @@ Recent updates to LetterMonstr include:
 4. **Database Migrations**: Automatic database schema updates to support new features
 5. **Source Links**: Summaries include clickable links to the original articles and web versions of newsletters
 6. **Gmail Integration**: Processes unread emails and marks them as read after successful processing
-7. **Improved Content Extraction**: Better handling of forwarded newsletters from Gmail
-8. **JSON Serialization Fixes**: Enhanced handling of datetime objects for reliable content storage
-9. **Improved Error Handling**: Better handling of database locking and connection issues
-10. **Database Reset Tool**: Easily reset the database while maintaining backups
-11. **Content Processing Diagnostics**: New tool to diagnose and fix content processing issues
+7. **Advanced Forwarded Email Handling**: Significantly improved content extraction from forwarded newsletters across multiple email clients
+8. **Empty Summary Prevention**: Intelligent detection of empty or meaningless content to prevent sending empty summaries
+9. **JSON Serialization Fixes**: Enhanced handling of datetime objects for reliable content storage
+10. **Improved Error Handling**: Better handling of database locking and connection issues
+11. **Database Reset Tool**: Easily reset the database while maintaining backups
+12. **Content Processing Diagnostics**: New tool to diagnose and fix content processing issues
 
 ## Troubleshooting
 
@@ -429,6 +430,51 @@ If you encounter issues:
    ./stop_lettermonstr.sh
    ./run_lettermonstr.sh
    ```
+
+### Debug Mode
+
+For more detailed diagnostic information, LetterMonstr includes a debug mode:
+
+```bash
+./run_lettermonstr_debug.sh
+```
+
+This script:
+
+- Runs the application in the foreground (not as a background process)
+- Displays more verbose output for troubleshooting
+- Shows Python environment details and import diagnostics
+- Provides real-time console output without having to check log files
+
+Use debug mode when you need to troubleshoot startup issues or want to monitor the application's behavior in real-time.
+
+### No Summaries Being Sent
+
+1. Check that you have new unread emails in the configured email account
+2. Verify your Gmail API is properly set up and credentials are valid
+3. Run `./status_lettermonstr.sh` to check if the process is running and if there are unsummarized content items
+4. Check logs in `data/lettermonstr_periodic_runner.log` for any errors
+5. Ensure your summary schedule in `config.json` is correct (default is daily at 17:00)
+6. Try forcing a summary with `./force_summary.sh` to see if it generates and sends
+
+### Empty or Missing Content in Summaries
+
+1. Forwarded newsletters may not be parsed correctly if they use uncommon formatting
+2. LetterMonstr will not send completely empty summaries (this is by design)
+3. Check `data/lettermonstr_periodic_runner.log` for warnings about content extraction failures
+4. Different email clients format forwarded emails differently; try forwarding from Gmail directly
+5. If needed, use `python force_process_unread.py` to reprocess specific emails with improved parsing
+
+### Forwarded Email Handling
+
+LetterMonstr now includes enhanced support for:
+
+- Gmail forwarded newsletters
+- Outlook forwarded content
+- Apple Mail forwarded messages
+- Plain text forwards
+
+If a specific newsletter format isn't being parsed correctly, please submit an issue with a sample of the email format (with personal information removed).
 
 ### Common Issues and Solutions
 

@@ -83,6 +83,7 @@ class Summary(Base):
     creation_date = Column(DateTime, default=datetime.now)
     sent = Column(Boolean, default=False)
     sent_date = Column(DateTime, nullable=True)
+    is_forced = Column(Boolean, default=False)  # Indicates if this was a forced/on-demand summary
 
 class ProcessedContent(Base):
     """Model for storing content that has been processed but not yet summarized."""

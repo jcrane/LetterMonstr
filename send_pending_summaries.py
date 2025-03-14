@@ -14,6 +14,7 @@ import os
 import sys
 import logging
 from datetime import datetime
+import json
 
 # Set up the Python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -47,11 +48,11 @@ except FileNotFoundError:
 
 # Import necessary components
 try:
-    from src.database.models import get_session, Summary
+    from src.database.models import get_session, Summary, ProcessedContent
     from src.mail_handling.sender import EmailSender
+    from src.summarize.generator import SummaryGenerator
 except ImportError as e:
     print(f"\nError importing required modules: {e}")
-    print("Please ensure all dependencies are installed.")
     sys.exit(1)
 
 # Set up logging
