@@ -171,14 +171,21 @@ Follow these guidelines:
 6. Remove any content that appears to be advertising or sponsored.
 7. Include important details like dates, statistics, and key findings.
 8. Present a balanced view without injecting your own opinions.
-9. Use bullet points for clarity where appropriate.
+9. Use plain text formatting that works well in Gmail and other email clients:
+   - Use UPPERCASE for main section headers (e.g., "AI NEWS AND UPDATES")
+   - Use CAPITALIZED section titles with underlines using equal signs for subsections (e.g., "Google's Gemma 3 Model" followed by "======================")
+   - Use asterisks (*) instead of bullet points
+   - Use indentation with spaces (4 spaces) for lists
+   - Use clear spacing between sections (double line breaks)
+   - Use dividers with dashes (-----) to separate major sections
 10. For EACH article or story from the newsletters, include a brief summary - don't skip any articles.
-11. Include relevant source links for all articles (use markdown style links like [Title](URL)).
-12. Use section headers to organize the summary by topic areas.
-13. If you find yourself omitting content due to length, create a separate "Additional Stories" section rather than leaving items out completely.
+11. Include relevant source links for all articles in plain text format (Source: URL).
+12. If you find yourself omitting content due to length, create a separate "ADDITIONAL STORIES" section rather than leaving items out completely.
 
 The summary should be thorough and detailed, prioritizing completeness over brevity.
 Make sure to maintain all web links so readers can dive deeper into topics they find interesting.
+
+IMPORTANT: Format the output to be easily readable in a plain-text email client. Do NOT use markdown or HTML formatting.
 
 CONTENT TO SUMMARIZE:
 {content}

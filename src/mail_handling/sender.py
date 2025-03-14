@@ -86,16 +86,24 @@ class EmailSender:
         # This handles links in the format [text](url)
         html_summary = summary_text
         
-        # Convert markdown-style links to HTML links
-        link_pattern = r'\[(.*?)\]\((https?://[^)]+)\)'
-        html_summary = re.sub(link_pattern, r'<a href="\2" target="_blank">\1</a>', html_summary)
-        
-        # Make bare URLs clickable too
-        url_pattern = r'(?<!\()(https?://[^\s<]+)(?![^<]*>)'
+        # Convert plain URLs to HTML links
+        url_pattern = r'(https?://[^\s]+)'
         html_summary = re.sub(url_pattern, r'<a href="\1" target="_blank">\1</a>', html_summary)
         
-        # Replace newlines with HTML breaks
+        # Replace newlines with HTML breaks and preserve spacing
         html_summary = html_summary.replace('\n', '<br>')
+        
+        # Enhance header formatting (lines with all caps)
+        html_summary = re.sub(r'<br>([A-Z][A-Z\s]+[A-Z])<br>', r'<br><h2>\1</h2><br>', html_summary)
+        
+        # Format section headers with underlines (======)
+        html_summary = re.sub(r'<br>([^<]+)<br>(=+)<br>', r'<br><h3>\1</h3><br>', html_summary)
+        
+        # Format asterisk bullet points 
+        html_summary = re.sub(r'<br>\s*\*\s*([^<]+)<br>', r'<br><ul><li>\1</li></ul><br>', html_summary)
+        
+        # Format dividers
+        html_summary = re.sub(r'<br>-{5,}<br>', r'<br><hr><br>', html_summary)
         
         # Create HTML version of the message
         html = f"""
@@ -103,13 +111,16 @@ class EmailSender:
           <head>
             <style>
               body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }}
-              h1 {{ color: #333366; }}
-              .summary {{ line-height: 1.6; }}
+              h1 {{ color: #333366; margin-bottom: 20px; }}
+              h2 {{ color: #333366; margin-top: 25px; margin-bottom: 10px; }}
+              h3 {{ color: #555; margin-top: 20px; margin-bottom: 10px; }}
+              .summary {{ line-height: 1.6; white-space: pre-wrap; }}
               .footer {{ margin-top: 30px; font-size: 12px; color: #666; }}
               a {{ color: #3366cc; text-decoration: none; }}
               a:hover {{ text-decoration: underline; }}
               ul {{ margin-left: 20px; padding-left: 15px; }}
               li {{ margin-bottom: 10px; }}
+              hr {{ border: 0; height: 1px; background: #ddd; margin: 20px 0; }}
             </style>
           </head>
           <body>
