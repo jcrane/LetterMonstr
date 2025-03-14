@@ -96,8 +96,11 @@ LetterMonstr provides several useful scripts to manage and interact with the sys
 - **Check status**: `./status_lettermonstr.sh` (shows status of either periodic or traditional process)
 - **Stop the service**: `./stop_lettermonstr.sh` (stops all running LetterMonstr processes)
 - **View latest summary**: `./view_latest_summary.sh`
-- **Send pending summaries**: `python src/send_pending_summaries.py [summary_id]`
-- **Force process unread emails**: `python src/force_process_unread.py`
+- **Force summary generation**: `./force_summary.sh` (processes unread emails and immediately generates/sends a summary)
+- **Force process emails**: `./force_process.sh` or `python force_process_unread.py`
+- **Send pending summaries**: `python send_pending_summaries.py [summary_id]`
+- **Reset database**: `./reset_database.py` (resets database while creating a backup)
+- **Fix missing content**: `./fix_content_processing.py` (diagnoses and fixes content processing issues)
 - **Generate a test newsletter**: `python test_newsletter.py`
 
 ## Requirements
@@ -402,6 +405,10 @@ Recent updates to LetterMonstr include:
 5. **Source Links**: Summaries include clickable links to the original articles and web versions of newsletters
 6. **Gmail Integration**: Processes unread emails and marks them as read after successful processing
 7. **Improved Content Extraction**: Better handling of forwarded newsletters from Gmail
+8. **JSON Serialization Fixes**: Enhanced handling of datetime objects for reliable content storage
+9. **Improved Error Handling**: Better handling of database locking and connection issues
+10. **Database Reset Tool**: Easily reset the database while maintaining backups
+11. **Content Processing Diagnostics**: New tool to diagnose and fix content processing issues
 
 ## Troubleshooting
 
@@ -422,6 +429,32 @@ If you encounter issues:
    ./stop_lettermonstr.sh
    ./run_lettermonstr.sh
    ```
+
+### Common Issues and Solutions
+
+#### Email Processing Issues
+
+If emails are marked as processed but their content isn't being stored:
+
+1. Run the diagnostics tool: `./fix_content_processing.py`
+2. Check if there are any JSON serialization errors in the logs
+3. Verify that the database isn't locked by another process
+
+#### Database Issues
+
+If you encounter database locking or corruption issues:
+
+1. Stop all LetterMonstr processes: `./stop_lettermonstr.sh`
+2. Reset the database (a backup will be created): `./reset_database.py`
+3. Restart the application: `./run_lettermonstr.sh`
+
+#### System Date Issues
+
+If you encounter issues related to email fetching dates:
+
+1. Check your system's date and time settings to ensure they're correct
+2. Review the `fetch_status.json` file to see the last fetch date
+3. Reset the fetch status by editing `data/fetch_status.json` or running the database reset script
 
 ### Running on Servers (Unsupported)
 

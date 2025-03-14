@@ -27,7 +27,7 @@ load_dotenv()
 
 # Import components
 from src.fetch_process import run_periodic_fetch
-from src.database.models import get_session, ProcessedContent, Summary
+from src.database.models import get_session, ProcessedContent, Summary, ProcessedEmail
 from src.summarize.processor import ContentProcessor
 from src.summarize.generator import SummaryGenerator
 from src.mail_handling.sender import EmailSender
@@ -103,8 +103,19 @@ def generate_and_send_summary():
             # Get all unsummarized content
             unsummarized = session.query(ProcessedContent).filter_by(summarized=False).all()
             
+            # Get total count for debugging
+            total_content = session.query(ProcessedContent).count()
+            processed_emails_count = session.query(ProcessedEmail).count()
+            
+            logger.info(f"Database status: {processed_emails_count} processed emails, {total_content} total content items, {len(unsummarized)} unsummarized")
+            
             if not unsummarized:
                 logger.info("No unsummarized content found")
+                
+                # If we have processed emails but no content, that could indicate a processing issue
+                if processed_emails_count > 0 and total_content == 0:
+                    logger.warning("There are processed emails but no content items - this may indicate an issue with email processing")
+                    
                 return
             
             logger.info(f"Found {len(unsummarized)} unsummarized content items")

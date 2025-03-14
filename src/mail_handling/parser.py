@@ -29,7 +29,12 @@ class EmailParser:
             # Store the current email data for reference in other methods
             self.current_email_data = email_data
             
+            # Create a session with timeout handling
             session = get_session(self.db_path)
+            
+            # Use SQLAlchemy text() for raw SQL
+            from sqlalchemy import text
+            session.execute(text("PRAGMA busy_timeout = 5000"))  # Set timeout to 5 seconds
             
             # Extract content from email
             content = email_data['content']

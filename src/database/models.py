@@ -4,7 +4,7 @@ Database models for LetterMonstr application.
 
 import os
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, ForeignKey, text
 from sqlalchemy.orm import relationship, sessionmaker, declarative_base
 
 # Using declarative_base from sqlalchemy.orm instead of sqlalchemy.ext.declarative which is deprecated
@@ -112,8 +112,14 @@ def init_db(db_path):
     # Ensure data directory exists
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     
-    # Create engine with newer SQLAlchemy connect arguments style
-    engine = create_engine(f'sqlite:///{db_path}', connect_args={"check_same_thread": False})
+    # Create engine with improved connection settings for concurrent access
+    engine = create_engine(
+        f'sqlite:///{db_path}', 
+        connect_args={
+            "check_same_thread": False,
+            "timeout": 30  # 30 second timeout for locked database
+        }
+    )
     
     # Create tables
     Base.metadata.create_all(engine)
@@ -125,5 +131,15 @@ def init_db(db_path):
 
 def get_session(db_path):
     """Get a new database session."""
+    # Import text function here to avoid circular imports
+    from sqlalchemy import text
+    
     Session = init_db(db_path)
-    return Session() 
+    session = Session()
+    
+    # Configure session for better concurrency using text() to properly format SQL
+    session.execute(text("PRAGMA journal_mode=WAL"))  # Write-Ahead Logging
+    session.execute(text("PRAGMA synchronous=NORMAL"))  # Faster with reasonable safety
+    session.execute(text("PRAGMA busy_timeout=30000"))  # 30 second timeout on locks
+    
+    return session 

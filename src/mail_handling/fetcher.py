@@ -9,6 +9,8 @@ import logging
 import os
 import sys
 from datetime import datetime, timedelta
+import socket
+import time
 
 # Add the project root to the Python path for imports
 current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -44,17 +46,37 @@ class EmailFetcher:
     
     def connect(self):
         """Connect to the IMAP server."""
-        try:
-            # Create an IMAP4 class with SSL
-            mail = imaplib.IMAP4_SSL(self.server, self.port)
-            
-            # Login to the server
-            mail.login(self.email, self.password)
-            
-            return mail
-        except Exception as e:
-            logger.error(f"Failed to connect to email server: {e}")
-            raise
+        max_retries = 3
+        retry_delay = 5  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Connecting to {self.server}:{self.port} (attempt {attempt+1}/{max_retries})")
+                # Create an IMAP4 class with SSL
+                mail = imaplib.IMAP4_SSL(self.server, self.port)
+                
+                # Login to the server
+                mail.login(self.email, self.password)
+                
+                logger.info(f"Successfully connected to {self.server}")
+                return mail
+                
+            except socket.gaierror as e:
+                logger.error(f"DNS resolution error connecting to server: {e}")
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying connection in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    logger.error(f"Failed to connect after {max_retries} attempts")
+                    raise
+                    
+            except Exception as e:
+                logger.error(f"Failed to connect to email server: {e}")
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying connection in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    raise
     
     def fetch_new_emails(self):
         """Fetch unread emails from the configured folders."""
