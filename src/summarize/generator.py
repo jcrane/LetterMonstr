@@ -60,6 +60,44 @@ class SummaryGenerator:
         """Prepare content for summarization with intelligent token management."""
         formatted_content = []
         
+        # Ensure we have actual content to process
+        if not processed_content:
+            logger.error("No content provided for summarization")
+            return "NO CONTENT AVAILABLE FOR SUMMARIZATION"
+        
+        # Check if we have meaningful content in the items
+        has_meaningful_content = False
+        total_content_length = 0
+        min_content_length = 100  # Minimum threshold for meaningful content
+        
+        # Count meaningful content items
+        meaningful_items = 0
+        
+        for item in processed_content:
+            content = item.get('content', '')
+            if isinstance(content, str) and len(content) > min_content_length:
+                has_meaningful_content = True
+                total_content_length += len(content)
+                meaningful_items += 1
+        
+        if not has_meaningful_content:
+            logger.error("No meaningful content found in processed items")
+            # Create a clear message about the empty content
+            empty_message = "NO MEANINGFUL NEWSLETTER CONTENT TO SUMMARIZE\n\n"
+            
+            # Add details about what was received
+            empty_message += f"Received {len(processed_content)} content items, but none contained meaningful text.\n"
+            empty_message += "Content sources:\n"
+            
+            for item in processed_content:
+                source = item.get('source', 'Unknown')
+                content_len = len(item.get('content', '')) if isinstance(item.get('content', ''), str) else 0
+                empty_message += f"- {source}: {content_len} characters\n"
+            
+            return empty_message
+        
+        logger.info(f"Found {meaningful_items} meaningful content items with total length of {total_content_length} characters")
+        
         # Estimate tokens per character (approximation)
         tokens_per_char = 0.25  # A rough estimate: ~4 characters per token for English
         
@@ -73,7 +111,7 @@ class SummaryGenerator:
         available_tokens = max_content_tokens - reserved_tokens
         
         # Estimate total content size
-        total_chars = sum(len(item.get('content', '')) for item in processed_content)
+        total_chars = total_content_length
         estimated_tokens = total_chars * tokens_per_char
         
         logger.info(f"Estimated content size: {total_chars} chars, ~{int(estimated_tokens)} tokens")
@@ -86,35 +124,22 @@ class SummaryGenerator:
         
         # Add each content item with scaled sizes
         for item in processed_content:
-            # Format basic item information
+            # Add basic item information
             item_text = f"SOURCE: {item.get('source', 'Unknown')}\n"
-            item_text += f"DATE: {item.get('date', datetime.now()).strftime('%Y-%m-%d')}\n"
             
-            # Add source URLs if available
-            email_content = item.get('original_email', {})
-            source_links = []
-            
-            # Check if there's a web version link in the email
-            if isinstance(email_content, dict) and 'links' in email_content:
-                for link in email_content.get('links', []):
-                    # Look for typical "View in browser" or "Web version" links
-                    title = link.get('title', '').lower()
-                    url = link.get('url', '')
-                    if url and ('web' in title or 'browser' in title or 'view' in title):
-                        source_links.append(f"WEB VERSION: {url}")
-                        break
-            
-            # Add article URLs
-            articles = item.get('articles', [])
-            for article in articles:
-                article_url = article.get('url', '')
-                article_title = article.get('title', '')
-                if article_url and article_title:
-                    source_links.append(f"ARTICLE: {article_title} - {article_url}")
-            
-            # Add source links to the content
-            if source_links:
-                item_text += "\nSOURCE LINKS:\n" + "\n".join(source_links) + "\n"
+            # Handle date which could be a string or datetime object
+            date_value = item.get('date', datetime.now())
+            if isinstance(date_value, str):
+                # If it's a string, just use it directly
+                item_text += f"DATE: {date_value}\n"
+            else:
+                # If it's a datetime object, format it
+                try:
+                    item_text += f"DATE: {date_value.strftime('%Y-%m-%d')}\n"
+                except Exception as e:
+                    # Fallback to current date if there's any error
+                    logger.warning(f"Error formatting date: {e}, using current date")
+                    item_text += f"DATE: {datetime.now().strftime('%Y-%m-%d')}\n"
             
             item_text += "\n"
             
@@ -142,6 +167,32 @@ class SummaryGenerator:
                     logger.debug(f"Truncated content for '{item.get('source', 'Unknown')}' from {content_size} to {len(content)} chars")
             
             item_text += f"CONTENT:\n{content}\n\n"
+            
+            # Add source URLs if available - AFTER the content
+            email_content = item.get('original_email', {})
+            source_links = []
+            
+            # Check if there's a web version link in the email
+            if isinstance(email_content, dict) and 'links' in email_content:
+                for link in email_content.get('links', []):
+                    # Look for typical "View in browser" or "Web version" links
+                    title = link.get('title', '').lower()
+                    url = link.get('url', '')
+                    if url and ('web' in title or 'browser' in title or 'view' in title):
+                        source_links.append(f"WEB VERSION: {link.get('title', 'Web Version')} - {url}")
+                        break
+            
+            # Add article URLs
+            articles = item.get('articles', [])
+            for article in articles:
+                article_url = article.get('url', '')
+                article_title = article.get('title', '')
+                if article_url and article_title:
+                    source_links.append(f"ARTICLE: {article_title} - {article_url}")
+            
+            # Add source links to the content
+            if source_links:
+                item_text += "SOURCE LINKS:\n" + "\n".join(source_links) + "\n"
             
             # Add to formatted content
             formatted_content.append(item_text)
@@ -171,19 +222,26 @@ Follow these guidelines:
 6. Remove any content that appears to be advertising or sponsored.
 7. Include important details like dates, statistics, and key findings.
 8. Present a balanced view without injecting your own opinions.
-9. Use bullet points for clarity where appropriate.
+9. Use plain text formatting that works well in Gmail and other email clients:
+   - Use UPPERCASE for main section headers (e.g., "AI NEWS AND UPDATES")
+   - Use CAPITALIZED section titles with underlines using equal signs for subsections (e.g., "Google's Gemma 3 Model" followed by "======================")
+   - Use asterisks (*) instead of bullet points
+   - Use indentation with spaces (4 spaces) for lists
+   - Use clear spacing between sections (double line breaks)
+   - Use dividers with dashes (-----) to separate major sections
 10. For EACH article or story from the newsletters, include a brief summary - don't skip any articles.
-11. Include relevant source links for all articles (use markdown style links like [Title](URL)).
-12. Use section headers to organize the summary by topic areas.
-13. If you find yourself omitting content due to length, create a separate "Additional Stories" section rather than leaving items out completely.
+11. IMPORTANT LINK FORMATTING: Include relevant source links for all articles, but place them at the END of each summary section, not at the beginning. Format links as "[Source: Title]" where Title is the publication or article name, and make them proper hyperlinks.
+12. If you find yourself omitting content due to length, create a separate "ADDITIONAL STORIES" section rather than leaving items out completely.
 
 The summary should be thorough and detailed, prioritizing completeness over brevity.
-Make sure to maintain all web links so readers can dive deeper into topics they find interesting.
+Make sure to maintain all web links so readers can dive deeper into topics they find interesting, but place them at the end of content sections, not in the main text.
+
+IMPORTANT: Format the output to be easily readable in a plain-text email client. Do NOT use markdown or HTML formatting.
 
 CONTENT TO SUMMARIZE:
 {content}
 
-Please provide a detailed and comprehensive summary of the above content, organized by topic and including ALL significant stories and articles with their relevant source links.
+Please provide a detailed and comprehensive summary of the above content, organized by topic and including ALL significant stories and articles with their relevant source links placed at the end of each content section.
 """
         return prompt
     
@@ -224,9 +282,34 @@ Please provide a detailed and comprehensive summary of the above content, organi
         """Store the generated summary in the database."""
         try:
             # Calculate period start and end dates
-            dates = [item.get('date', datetime.now()) for item in processed_content]
-            period_start = min(dates) if dates else datetime.now()
-            period_end = max(dates) if dates else datetime.now()
+            dates = []
+            for item in processed_content:
+                date_value = item.get('date', datetime.now())
+                # Convert string dates to datetime objects
+                if isinstance(date_value, str):
+                    try:
+                        # Try to parse the date string - handle different formats
+                        # First try ISO format
+                        try:
+                            date_value = datetime.fromisoformat(date_value.replace('Z', '+00:00'))
+                        except ValueError:
+                            # If that fails, try a more flexible approach
+                            import dateutil.parser
+                            date_value = dateutil.parser.parse(date_value)
+                        dates.append(date_value)
+                    except Exception as e:
+                        logger.warning(f"Could not parse date string '{date_value}': {e}")
+                        # Use current time as fallback
+                        dates.append(datetime.now())
+                else:
+                    dates.append(date_value)
+            
+            # Use current time if no valid dates found
+            if not dates:
+                period_start = period_end = datetime.now()
+            else:
+                period_start = min(dates)
+                period_end = max(dates)
             
             # Determine summary type based on timespan
             days_span = (period_end - period_start).days

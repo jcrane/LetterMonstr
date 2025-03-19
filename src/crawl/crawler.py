@@ -161,20 +161,30 @@ class WebCrawler:
         return text
     
     def _is_advertisement(self, content):
-        """Check if content appears to be an advertisement."""
-        # Check against ad keywords
-        lower_content = (content['title'] + ' ' + content['description'] + ' ' + content['clean_text']).lower()
-        
-        for keyword in self.ad_keywords:
-            if keyword.lower() in lower_content:
-                logger.info(f"Identified advertisement content: {content['url']} (matched keyword: {keyword})")
-                return True
-        
-        # Additional checks could be added here:
-        # - Check for common ad patterns in the URL
-        # - Check content length (very short content might be an ad)
-        # - Use NLP to classify content
-        
+        """Check if content is likely an advertisement."""
+        if not content:
+            return False
+            
+        # Check title and description for ad keywords
+        try:
+            # Handle potential None values safely
+            title = content.get('title', '') or ''
+            description = content.get('description', '') or ''
+            clean_text = content.get('clean_text', '') or ''
+            
+            # Combine the fields for checking
+            lower_content = (title + ' ' + description + ' ' + clean_text).lower()
+            
+            # Check for ad keywords
+            for keyword in self.ad_keywords:
+                if keyword.lower() in lower_content:
+                    logger.info(f"Identified advertisement content: {content.get('url', '')} (matched keyword: {keyword})")
+                    return True
+        except Exception as e:
+            logger.error(f"Error checking if content is advertisement: {e}")
+            # Be conservative - don't flag as ad if we can't tell
+            return False
+            
         return False
     
     def _is_crawled(self, session, url):

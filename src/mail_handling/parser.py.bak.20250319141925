@@ -163,7 +163,6 @@ class EmailParser:
     def extract_links(self, content, content_type='html'):
         """Extract links from email content."""
         links = []
-        seen_urls = set()  # Track seen URLs to avoid duplicates
         
         try:
             if content_type == 'html':
@@ -180,22 +179,11 @@ class EmailParser:
                         href = a_tag['href'].strip()
                         text = a_tag.get_text().strip()
                         
-                        # Skip mailto links
-                        if href.startswith('mailto:'):
-                            continue
-                            
-                        # Skip image links
-                        if href.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg')):
-                            continue
-                        
-                        # Accept any http/https URL
-                        if href.startswith('http') or href.startswith('https') or href.startswith('www'):
-                            if href not in seen_urls:
-                                seen_urls.add(href)
-                                links.append({
-                                    'url': href,
-                                    'title': text if text else href
-                                })
+                        if href and self._is_valid_url(href):
+                            links.append({
+                                'url': href,
+                                'title': text if text else href
+                            })
                 except Exception as bs_error:
                     logger.error(f"BeautifulSoup HTML parsing failed: {bs_error}")
                     # Fall back to regex extraction
@@ -204,26 +192,16 @@ class EmailParser:
                 # Extract links from text content using regex
                 links = self._extract_links_with_regex(content)
             
-            # If we haven't found any links, try harder with more permissive regex
-            if not links:
-                logger.info("No links found with standard methods, trying more aggressive extraction")
-                # Look for anything that could be a URL in the text
-                text_content = soup.get_text() if 'soup' in locals() else content
-                url_pattern = r'https?://[^\s<>"\']+|www\.[^\s<>"\']+'
-                urls = re.findall(url_pattern, text_content)
-                
-                for url in urls:
-                    if url not in seen_urls:
-                        seen_urls.add(url)
-                        links.append({
-                            'url': url,
-                            'title': url
-                        })
-                
-                if links:
-                    logger.info(f"Found {len(links)} links using aggressive extraction")
+            # Remove duplicates by URL
+            unique_links = []
+            seen_urls = set()
             
-            return links
+            for link in links:
+                if link['url'] not in seen_urls:
+                    seen_urls.add(link['url'])
+                    unique_links.append(link)
+            
+            return unique_links
             
         except Exception as e:
             logger.error(f"Error extracting links: {e}", exc_info=True)
@@ -232,10 +210,8 @@ class EmailParser:
     def _extract_links_with_regex(self, content):
         """Extract links using regular expressions as a fallback."""
         links = []
-        seen_urls = set()
-        
-        # More comprehensive URL pattern - catches more variants
-        url_pattern = r'https?://[^\s<>"\']+|www\.[^\s<>"\']+'
+        # This is a simple regex for URLs, not perfect but functional
+        url_pattern = r'https?://[^\s<>"]+|www\.[^\s<>"]+'
         
         try:
             # Ensure content is a string
@@ -245,19 +221,7 @@ class EmailParser:
             found_urls = re.findall(url_pattern, content)
             
             for url in found_urls:
-                # Clean up URL - remove trailing punctuation that might be included
-                url = url.rstrip(',.;:\'\"!?)')
-                
-                # Skip image links
-                if url.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg')):
-                    continue
-                
-                # Normalize the URL
-                if url.startswith('www.'):
-                    url = 'http://' + url
-                
-                if url not in seen_urls:
-                    seen_urls.add(url)
+                if self._is_valid_url(url):
                     links.append({
                         'url': url,
                         'title': url
@@ -297,15 +261,128 @@ class EmailParser:
             cleaned_soup = str(soup)
             
             if is_forwarded:
-                # ===== SIMPLIFIED FORWARDED EMAIL HANDLING =====
-                # Keep ALL content from forwarded emails to ensure we don't miss any links
-                logger.info("Using simplified forwarded email handling - preserving all content")
+                # ===== FORWARDED EMAIL HANDLING =====
+                # This section is completely revised to better handle forwarded emails
                 
-                # Use the entire cleaned HTML content
-                clean_html = cleaned_soup
+                logger.info("Processing forwarded email with enhanced detection")
                 
-                # Log the content size
-                logger.info(f"Using full forwarded content, size: {len(clean_html)} chars")
+                # Common markers for forwarded emails from different clients
+                forwarded_markers = [
+                    "---------- Forwarded message ---------",  # Gmail
+                    "Begin forwarded message:",               # Apple Mail
+                    "From: ",                                 # Generic marker
+                    "Forwarded message from",                # Outlook
+                    "Original Message",                       # Older Outlook
+                    "---------- Original Message ----------", # Other clients
+                    "forwarded email",                        # Generic
+                    ">",                                      # Quote marker in plain text emails
+                ]
+                
+                # Strategy 1: Look for forwarded content markers
+                forwarded_section = None
+                
+                for marker in forwarded_markers:
+                    # Try to find text containing the marker
+                    marker_elem = soup.find(text=lambda text: text and marker in text)
+                    if marker_elem:
+                        logger.info(f"Found forwarded marker: {marker}")
+                        
+                        # Try to get the parent container of the forwarded content
+                        current = marker_elem.parent
+                        
+                        # Go up to find a significant container
+                        for _ in range(5):  # Limit the levels we go up
+                            if current.name in ['div', 'blockquote', 'table', 'td', 'body']:
+                                forwarded_section = current
+                                logger.info(f"Found forwarded section container: {current.name}")
+                                break
+                            current = current.parent
+                            if not current:
+                                break
+                        
+                        if forwarded_section:
+                            break
+                
+                # Strategy 2: If no marker, look for some common structural patterns
+                if not forwarded_section:
+                    # Gmail often wraps forwarded content in blockquote
+                    blockquotes = soup.find_all('blockquote')
+                    if blockquotes:
+                        largest_blockquote = max(blockquotes, key=lambda x: len(str(x)))
+                        if len(str(largest_blockquote)) > 200:  # Arbitrary size threshold
+                            forwarded_section = largest_blockquote
+                            logger.info("Found forwarded content in blockquote")
+                
+                # Strategy 3: Look for the largest div after a potential header area
+                if not forwarded_section:
+                    # Skip approximately 20% of the content from the top to avoid headers
+                    divs = soup.find_all('div')
+                    if len(divs) > 5:  # Ensure there are enough divs to work with
+                        relevant_divs = divs[int(len(divs)*0.2):]  # Skip top 20%
+                        
+                        if relevant_divs:
+                            # Find the largest div by content size
+                            largest_div = max(relevant_divs, key=lambda x: len(str(x)))
+                            if len(str(largest_div)) > len(str(soup)) * 0.3:  # At least 30% of total size
+                                forwarded_section = largest_div
+                                logger.info("Found forwarded content using largest div after header section")
+                
+                # Strategy 4: Look for div containing most of the links
+                if not forwarded_section:
+                    divs_with_links = {}
+                    for div in soup.find_all('div'):
+                        link_count = len(div.find_all('a'))
+                        if link_count > 0:
+                            divs_with_links[div] = link_count
+                    
+                    if divs_with_links:
+                        most_links_div = max(divs_with_links.items(), key=lambda x: x[1])[0]
+                        if divs_with_links[most_links_div] > 3:  # At least some links
+                            forwarded_section = most_links_div
+                            logger.info(f"Found forwarded content in div with most links: {divs_with_links[most_links_div]} links")
+                
+                # Strategy 5: For Apple Mail forwards, look for specific structure
+                if not forwarded_section:
+                    # Apple Mail often has a specific format with headers at top
+                    apple_header = soup.find(text=lambda text: text and "Begin forwarded message:" in text)
+                    if apple_header:
+                        parent = apple_header.parent
+                        # Apple Mail typically has the content after the headers
+                        next_sibling = parent.find_next_sibling()
+                        if next_sibling and len(str(next_sibling)) > 200:
+                            forwarded_section = next_sibling
+                            logger.info("Found forwarded content in Apple Mail format")
+                
+                # If strategies found a forwarded section, extract its content
+                if forwarded_section:
+                    # Before extracting content, try to clean it further
+                    
+                    # Remove any nested forwarded messages (common in email chains)
+                    # This prevents getting older forwards mixed with the current one
+                    nested_forwards = forwarded_section.find_all(text=lambda text: text and any(marker in text for marker in forwarded_markers))
+                    for nested in nested_forwards:
+                        # If this is not the main marker we found, it might be a nested forward
+                        if nested != marker_elem:
+                            # Try to remove the nested forwarded section
+                            nested_parent = nested.parent
+                            for _ in range(3):  # Go up a few levels to get the container
+                                if nested_parent.name in ['div', 'blockquote', 'table']:
+                                    # Check if this contains a significant portion of our content
+                                    if len(str(nested_parent)) < len(str(forwarded_section)) * 0.7:
+                                        nested_parent.decompose()
+                                        logger.info("Removed nested forwarded message")
+                                    break
+                                nested_parent = nested_parent.parent
+                                if not nested_parent:
+                                    break
+                    
+                    # Extract the content with any additional cleaning
+                    clean_html = str(forwarded_section)
+                    logger.info(f"Successfully extracted forwarded content section, size: {len(clean_html)} chars")
+                else:
+                    # Fallback: use the entire document if we couldn't find a specific section
+                    clean_html = cleaned_soup
+                    logger.warning("Could not identify specific forwarded content section, using entire email")
             else:
                 # For regular (non-forwarded) emails
                 # Try to find the main content container - typically a large div or table
@@ -370,14 +447,9 @@ class EmailParser:
         if not url:
             return False
         
-        # Accept "www." URLs too
-        if url.startswith('www.'):
-            url = 'http://' + url
-        
         try:
             result = urlparse(url)
-            # More permissive URL validation
-            return (result.scheme in ['http', 'https'] and result.netloc) or (not result.scheme and result.netloc.startswith("www."))
+            return all([result.scheme, result.netloc]) and result.scheme in ['http', 'https']
         except:
             return False
     

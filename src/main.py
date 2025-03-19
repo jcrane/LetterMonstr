@@ -43,141 +43,271 @@ except ImportError:
 
 # Database imports
 try:
-    from src.database.models import init_db, get_session, ProcessedEmail, Summary
+    from src.database.models import init_db, get_session, ProcessedEmail, Summary, ProcessedContent
 except ImportError as e:
     print(f"Error: Database module is missing: {e}")
     print("  pip install sqlalchemy")
     sys.exit(1)
 
-# Import application components with proper error handling
-_has_components = True
-try:
-    from src.mail_handling.fetcher import EmailFetcher
-    from src.mail_handling.parser import EmailParser
-    from src.crawl.crawler import WebCrawler
-    from src.summarize.processor import ContentProcessor
-    from src.summarize.generator import SummaryGenerator
-    from src.mail_handling.sender import EmailSender
-except ImportError as e:
-    _has_components = False
-    print(f"Warning: Could not import a required component: {e}")
-    print("Some functionality may be limited. Try reinstalling requirements:")
-    print("  pip install -r requirements.txt")
+# Load environment variables
+load_dotenv()
+
+# Local imports
+from src.mail_handling.fetcher import EmailFetcher
+from src.mail_handling.parser import EmailParser
+from src.crawl.crawler import WebCrawler
+from src.summarize.processor import ContentProcessor
+from src.summarize.generator import SummaryGenerator
+from src.mail_handling.sender import EmailSender
+from src.fetch_process import run_periodic_fetch  # Import our new function
 
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("data/lettermonstr.log"),
+        logging.FileHandler(os.path.join('data', 'lettermonstr.log')),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
+# Global config
+config = None
+
 def load_config():
     """Load configuration from YAML file."""
-    config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
-                             'config', 'config.yaml')
+    global config
+    config_path = os.path.join('config', 'config.yaml')
     
-    # Check if config file exists
-    if not os.path.exists(config_path):
-        logger.error(f"Configuration file not found at {config_path}")
-        print(f"\nError: Configuration file not found at {config_path}")
-        print("\nPlease run the setup script first:")
-        print("  python3 setup_config.py")
-        sys.exit(1)
-        
     try:
         with open(config_path, 'r') as file:
-            return yaml.safe_load(file)
+            config = yaml.safe_load(file)
     except Exception as e:
         logger.error(f"Failed to load configuration: {e}")
         sys.exit(1)
 
 def process_newsletters():
     """Process newsletters and generate summaries."""
+    if not config:
+        load_config()
+    
     logger.info("Starting newsletter processing")
     
     try:
-        # Initialize components
+        # Check if we're using periodic fetching mode
+        if config['email'].get('periodic_fetch', False):
+            logger.info("Using periodic fetching mode - processing accumulated content")
+            process_accumulated_content()
+        else:
+            logger.info("Using traditional mode - fetching all emails at once")
+            process_traditional()
+            
+    except Exception as e:
+        logger.error(f"Error processing newsletters: {e}", exc_info=True)
+
+def process_accumulated_content():
+    """Process content that has been accumulated through periodic fetching."""
+    try:
+        # Initialize required components
+        content_processor = ContentProcessor(config['content'])
+        summary_generator = SummaryGenerator(config['llm'])
+        email_sender = EmailSender(config['summary'])
         email_fetcher = EmailFetcher(config['email'])
         
-        # Test if other components are available
-        if _has_components:
-            email_parser = EmailParser()
-            web_crawler = WebCrawler(config['content'])
-            content_processor = ContentProcessor(config['content'])
-            summary_generator = SummaryGenerator(config['llm'])
-            email_sender = EmailSender(config['summary'])
+        # Get database session
+        db_path = os.path.join('data', 'lettermonstr.db')
+        session = get_session(db_path)
+        
+        try:
+            # Get all unsummarized content
+            unsummarized = session.query(ProcessedContent).filter_by(summarized=False).all()
             
-            # Fetch emails
-            emails = email_fetcher.fetch_new_emails()
-            logger.info(f"Fetched {len(emails)} new emails")
-            
-            if not emails:
-                logger.info("No new emails to process")
+            if not unsummarized:
+                logger.info("No unsummarized content found")
                 return
             
-            # Define batch size for processing
-            # This controls how many emails are processed in a single batch to avoid token limits
-            batch_size = 5  # Process 5 emails at a time - adjust based on your newsletters' typical size
+            logger.info(f"Found {len(unsummarized)} unsummarized content items")
+            
+            # Prepare content for summarization
+            all_content = []
+            emails_to_mark = set()  # Use a set to avoid duplicates
+            
+            for item in unsummarized:
+                try:
+                    # Add processed content to the list
+                    all_content.append(item.processed_content)
+                    
+                    # Track emails to mark as read if configured to do so
+                    if not config['email'].get('mark_read_after_summarization', True):
+                        continue
+                        
+                    # If content is associated with an email, track it for marking as read
+                    if item.email_id:
+                        email = item.email
+                        if email and email.message_id:
+                            emails_to_mark.add((
+                                email.message_id,
+                                email.subject,
+                                email.sender,
+                                email.date_received
+                            ))
+                except Exception as e:
+                    logger.error(f"Error processing content item {item.id}: {e}", exc_info=True)
+            
+            # Convert set back to list of dicts for processing
+            emails_to_mark_list = [
+                {
+                    'message_id': msg_id,
+                    'subject': subject,
+                    'sender': sender,
+                    'date': date
+                }
+                for msg_id, subject, sender, date in emails_to_mark
+            ]
+            
+            # Process and deduplicate content
+            processed_content = content_processor.process_and_deduplicate(all_content)
+            
+            # Generate summary
+            logger.info("Generating summary...")
+            combined_summary = summary_generator.generate_summary(processed_content)
+            
+            if not combined_summary:
+                logger.error("Failed to generate summary")
+                return
+            
+            # Send the combined summary if it's time
+            if should_send_summary():
+                # Send the email
+                email_sender.send_summary(combined_summary)
+                logger.info("Summary email sent successfully")
+                
+                # Mark all emails as read if configured to do so
+                if emails_to_mark_list and config['email'].get('mark_read_after_summarization', True):
+                    email_fetcher.mark_emails_as_processed(emails_to_mark_list)
+                    logger.info(f"Marked {len(emails_to_mark_list)} emails as processed")
+                
+                # Mark all processed content as summarized
+                for item in unsummarized:
+                    item.summarized = True
+                
+                # Commit the changes
+                session.commit()
+                logger.info(f"Marked {len(unsummarized)} content items as summarized")
+            else:
+                # Save the summary for later sending but don't mark emails as read
+                logger.info("Not sending summary yet - waiting for scheduled delivery time")
+                try:
+                    # Save summary to database
+                    summary = Summary(
+                        summary_type=config['summary']['frequency'],
+                        summary_text=combined_summary,
+                        creation_date=datetime.now(),
+                        sent=False
+                    )
+                    session.add(summary)
+                    session.commit()
+                    summary_id = summary.id
+                    
+                    logger.info(f"Summary saved to database with ID: {summary_id} for later sending")
+                    logger.info("Emails will remain unread until the summary is sent")
+                except Exception as e:
+                    logger.error(f"Error saving summary to database: {e}", exc_info=True)
+        finally:
+            session.close()
+    except Exception as e:
+        logger.error(f"Error processing accumulated content: {e}", exc_info=True)
+
+def process_traditional():
+    """Process newsletters using the traditional approach (all at once)."""
+    try:
+        # Initialize all components
+        email_fetcher = EmailFetcher(config['email'])
+        email_parser = EmailParser(config['content'])
+        web_crawler = WebCrawler(config['content'])
+        content_processor = ContentProcessor(config['content'])
+        summary_generator = SummaryGenerator(config['llm'])
+        email_sender = EmailSender(config['summary'])
+        
+        # Fetch new emails
+        emails = email_fetcher.fetch_new_emails()
+        
+        if not emails:
+            logger.info("No new emails to process")
+            return
+        
+        logger.info(f"Fetched {len(emails)} new emails")
+        
+        # Process emails in batches
+        batch_size = config.get('processing', {}).get('batch_size', 5)
+        
+        # Find already processed emails
+        db_path = os.path.join('data', 'lettermonstr.db')
+        session = get_session(db_path)
+        
+        try:
+            # Filtering out already processed emails
+            emails_to_process = []
+            for email in emails:
+                message_id = email.get('message_id', '')
+                if not message_id:
+                    # If no message ID, we can't track it, so process anyway
+                    emails_to_process.append(email)
+                    continue
+                
+                # Check if we've already processed this email
+                processed = session.query(ProcessedEmail).filter_by(message_id=message_id).first()
+                if not processed:
+                    emails_to_process.append(email)
+                    
+                    # Create a database record for this email
+                    processed_email = ProcessedEmail(
+                        message_id=message_id,
+                        subject=email.get('subject', 'No Subject'),
+                        sender=email.get('sender', 'Unknown'),
+                        date_received=email.get('date', datetime.now()),
+                        processed=False
+                    )
+                    session.add(processed_email)
+                    session.commit()
+                    
+                    # Add the database ID to the email object for reference
+                    email['db_id'] = processed_email.id
+            
+            # If we're in limited functionality mode, just return after email fetching
+            if config.get('limited_functionality', False):
+                # Just test email fetching
+                logger.info(f"Found {len(emails_to_process)} new emails to process (limited functionality mode)")
+                
+                # Print summary of fetched emails
+                for email in emails_to_process:
+                    logger.info(f"Email: {email['subject']} from {email['sender']}")
+                
+                return
+            
+            # Process the emails that haven't been processed yet
+            if not emails_to_process:
+                logger.info("All fetched emails have already been processed")
+                return
+            
+            logger.info(f"Processing {len(emails_to_process)} new emails")
             
             # Split emails into batches
-            email_batches = [emails[i:i + batch_size] for i in range(0, len(emails), batch_size)]
-            logger.info(f"Split {len(emails)} emails into {len(email_batches)} batches of up to {batch_size} emails each")
+            batches = [emails_to_process[i:i + batch_size] for i in range(0, len(emails_to_process), batch_size)]
+            logger.info(f"Split into {len(batches)} batches of size {batch_size}")
             
-            # Process each batch separately
             all_summaries = []
             all_successfully_processed = []
             
-            for batch_idx, email_batch in enumerate(email_batches):
-                logger.info(f"Processing batch {batch_idx+1}/{len(email_batches)} with {len(email_batch)} emails")
+            # Process each batch
+            for batch_idx, batch in enumerate(batches):
+                logger.info(f"Processing batch {batch_idx+1} of {len(batches)} with {len(batch)} emails")
                 
-                # Track successfully processed emails for this batch
+                all_content = []
                 successfully_processed = []
                 
-                # FIRST: Save emails to database before processing
-                session = get_session(os.path.join('data', 'lettermonstr.db'))
-                try:
-                    saved_emails = []
-                    for email in email_batch:
-                        try:
-                            # Create a ProcessedEmail record but don't mark as processed yet
-                            processed_email = ProcessedEmail(
-                                message_id=email['message_id'],
-                                subject=email['subject'],
-                                sender=email['sender'],
-                                date_received=email['date']
-                                # Omit date_processed to indicate it's not fully processed
-                            )
-                            session.add(processed_email)
-                            session.flush()  # Flush to get the ID without committing
-                            
-                            # Add the database ID to the email object
-                            email['db_id'] = processed_email.id
-                            saved_emails.append(email)
-                            
-                            logger.debug(f"Added email to database: {email['subject']} with ID {processed_email.id}")
-                        except Exception as e:
-                            logger.error(f"Error saving email {email['subject']} to database: {e}", exc_info=True)
-                    
-                    # Only commit if we successfully added all emails
-                    session.commit()
-                    logger.debug(f"Committed {len(saved_emails)} emails to database")
-                    
-                    # Now emails have IDs, process them
-                    emails_to_process = saved_emails
-                except Exception as e:
-                    session.rollback()
-                    logger.error(f"Error in database transaction: {e}", exc_info=True)
-                    emails_to_process = []
-                finally:
-                    session.close()
-                
-                # Process each email in this batch
-                all_content = []
-                for email in emails_to_process:
+                for email in batch:
                     try:
                         # Parse email content (now with DB ID)
                         parsed_content = email_parser.parse(email)
@@ -253,9 +383,6 @@ def process_newsletters():
                     # Save the summary for later sending but don't mark emails as read
                     logger.info("Not sending summary yet - waiting for scheduled delivery time")
                     try:
-                        db_path = os.path.join('data', 'lettermonstr.db')
-                        session = get_session(db_path)
-                        
                         # Save summary to database
                         summary = Summary(
                             summary_type=config['summary']['frequency'],
@@ -266,7 +393,6 @@ def process_newsletters():
                         session.add(summary)
                         session.commit()
                         summary_id = summary.id
-                        session.close()
                         
                         logger.info(f"Summary saved to database with ID: {summary_id} for later sending")
                         logger.info("Emails will remain unread until the summary is sent")
@@ -274,21 +400,11 @@ def process_newsletters():
                         logger.error(f"Error saving summary to database: {e}", exc_info=True)
             else:
                 logger.warning("No summaries were generated from any batch")
-        else:
-            # Just test email fetching
-            emails = email_fetcher.fetch_new_emails()
-            logger.info(f"Fetched {len(emails)} new emails (limited functionality mode)")
-            
-            if not emails:
-                logger.info("No new emails to process")
-                return
-            
-            # Print summary of fetched emails
-            for email in emails:
-                logger.info(f"Email: {email['subject']} from {email['sender']}")
+        finally:
+            session.close()
             
     except Exception as e:
-        logger.error(f"Error processing newsletters: {e}", exc_info=True)
+        logger.error(f"Error processing newsletters in traditional mode: {e}", exc_info=True)
 
 def should_send_summary():
     """Determine if it's time to send a summary based on configuration."""
@@ -319,55 +435,55 @@ def schedule_jobs():
     """Schedule jobs based on configuration."""
     delivery_time = config['summary']['delivery_time']
     
-    # Schedule newsletter processing
-    schedule.every().day.at(delivery_time).do(process_newsletters)
+    # If periodic fetching is enabled, use the new approach
+    if config['email'].get('periodic_fetch', False):
+        logger.info("Periodic fetching is enabled - using periodic_runner.py instead")
+        logger.info("Please run periodic_runner.py to start the periodic fetcher")
+        sys.exit(0)
     
-    logger.info(f"Scheduled processing for every day at {delivery_time}")
-    logger.info(f"Summary delivery frequency: {config['summary']['frequency']}")
-
-def main():
-    """Main entry point for the application."""
-    global config
+    # Schedule the daily job at the delivery time
+    frequency = config['summary']['frequency']
     
-    print("\nLetterMonstr - Newsletter aggregator and summarizer")
-    print("---------------------------------------------------")
-    
-    # Load environment variables
-    load_dotenv()
-    
-    # Load configuration
-    config = load_config()
-    
-    # Create data directory if it doesn't exist
-    os.makedirs('data', exist_ok=True)
-    
-    # Initialize database
-    if 'database' in config:
-        init_db(config['database']['path'])
+    if frequency == 'daily':
+        logger.info(f"Scheduling daily run at {delivery_time}")
+        schedule.every().day.at(delivery_time).do(process_newsletters)
+    elif frequency == 'weekly':
+        day = config['summary']['weekly_day']
+        days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+        day_name = days[day]
+        logger.info(f"Scheduling weekly run on {day_name} at {delivery_time}")
+        getattr(schedule.every(), day_name).at(delivery_time).do(process_newsletters)
+    elif frequency == 'monthly':
+        day = config['summary']['monthly_day']
+        logger.info(f"Scheduling monthly run on day {day} at {delivery_time}")
+        schedule.every().month.at(f"{day:02d} {delivery_time}").do(process_newsletters)
     else:
-        init_db('data/lettermonstr.db')
+        logger.error(f"Unknown frequency: {frequency}")
+        sys.exit(1)
     
-    # Check if we're in limited functionality mode
-    if not _has_components:
-        print("\nRunning in limited functionality mode (some components are not available)")
-        print("Only email fetching will be tested")
-    
-    # Schedule jobs
-    schedule_jobs()
-    
-    # Do an initial processing
-    logger.info("Performing initial processing")
+    # Run once immediately
+    logger.info("Running once immediately")
     process_newsletters()
     
-    # Keep the scheduler running
+    # Run the scheduler
     logger.info("Starting scheduler")
-    try:
-        while True:
-            schedule.run_pending()
-            time.sleep(60)
-    except KeyboardInterrupt:
-        print("\nExiting LetterMonstr...")
-        sys.exit(0)
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
+
+def main():
+    """Main entry point."""
+    # Initialize database
+    init_db()
+    
+    # Load configuration
+    load_config()
+    
+    # Log startup
+    logger.info("LetterMonstr starting up")
+    
+    # Run the scheduler
+    schedule_jobs()
 
 if __name__ == "__main__":
     main() 

@@ -4,8 +4,9 @@ Database models for LetterMonstr application.
 
 import os
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, ForeignKey, text
 from sqlalchemy.orm import relationship, sessionmaker, declarative_base
+import sqlite3
 
 # Using declarative_base from sqlalchemy.orm instead of sqlalchemy.ext.declarative which is deprecated
 Base = declarative_base()
@@ -83,14 +84,59 @@ class Summary(Base):
     creation_date = Column(DateTime, default=datetime.now)
     sent = Column(Boolean, default=False)
     sent_date = Column(DateTime, nullable=True)
+    is_forced = Column(Boolean, default=False)  # Indicates if this was a forced/on-demand summary
+
+class ProcessedContent(Base):
+    """Model for storing content that has been processed but not yet summarized."""
+    __tablename__ = 'processed_content'
     
+    id = Column(Integer, primary_key=True)
+    content_hash = Column(String(64), index=True, unique=True)  # For deduplication
+    email_id = Column(Integer, ForeignKey('processed_emails.id'), nullable=True)
+    source = Column(String(255))  # Where the content came from (email subject, URL, etc.)
+    content_type = Column(String(50))  # 'email', 'crawled', 'combined', etc.
+    raw_content = Column(Text)  # Original content
+    processed_content = Column(Text)  # Processed and cleaned content
+    content_metadata = Column(Text)  # Store additional metadata as JSON
+    date_processed = Column(DateTime, default=datetime.now)
+    summarized = Column(Boolean, default=False)  # Whether it's been included in a summary
+    summary_id = Column(Integer, ForeignKey('summaries.id'), nullable=True)  # Which summary included this content
+    
+    # Relationships
+    email = relationship("ProcessedEmail", foreign_keys=[email_id])
+    summary = relationship("Summary", foreign_keys=[summary_id])
+    
+    def __repr__(self):
+        return f"<ProcessedContent(id={self.id}, source='{self.source}', summarized={self.summarized})>"
+
 def init_db(db_path):
     """Initialize the database."""
     # Ensure data directory exists
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     
-    # Create engine with newer SQLAlchemy connect arguments style
-    engine = create_engine(f'sqlite:///{db_path}', connect_args={"check_same_thread": False})
+    # First set the SQLite pragmas using direct connection
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # Configure for better concurrency and performance
+    cursor.execute("PRAGMA journal_mode=WAL;")
+    cursor.execute("PRAGMA synchronous=NORMAL;")
+    cursor.execute("PRAGMA busy_timeout=120000;")  # 120 seconds (2 minutes)
+    cursor.execute("PRAGMA temp_store=MEMORY;")
+    cursor.execute("PRAGMA cache_size=-40000;")  # About 40MB
+    cursor.execute("PRAGMA foreign_keys=ON;")
+    conn.commit()
+    conn.close()
+    
+    # Create engine with improved connection settings for concurrent access
+    engine = create_engine(
+        f'sqlite:///{db_path}', 
+        connect_args={
+            "check_same_thread": False,
+            "timeout": 120  # 120 seconds timeout for locked database
+        },
+        isolation_level="SERIALIZABLE"  # Ensures transaction integrity
+    )
     
     # Create tables
     Base.metadata.create_all(engine)
@@ -102,5 +148,19 @@ def init_db(db_path):
 
 def get_session(db_path):
     """Get a new database session."""
+    # Import text function here to avoid circular imports
+    from sqlalchemy import text
+    
     Session = init_db(db_path)
-    return Session() 
+    session = Session()
+    
+    # Double-check that settings are applied in this specific session
+    session.execute(text("PRAGMA journal_mode=WAL;"))  # Write-Ahead Logging for better concurrency
+    session.execute(text("PRAGMA synchronous=NORMAL;"))  # Faster with reasonable safety
+    session.execute(text("PRAGMA busy_timeout=120000;"))  # 120 seconds (2 minutes)
+    session.execute(text("PRAGMA temp_store=MEMORY;"))  # Keep temporary tables in memory
+    session.execute(text("PRAGMA cache_size=-40000;"))  # About 40MB for caching
+    session.execute(text("PRAGMA foreign_keys=ON;"))  # Enforce foreign key constraints
+    session.execute(text("PRAGMA locking_mode=NORMAL;"))  # Allow multiple readers
+    
+    return session 

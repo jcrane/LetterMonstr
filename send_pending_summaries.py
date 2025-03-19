@@ -14,6 +14,7 @@ import os
 import sys
 import logging
 from datetime import datetime
+import json
 
 # Set up the Python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -47,11 +48,11 @@ except FileNotFoundError:
 
 # Import necessary components
 try:
-    from src.database.models import get_session, Summary
+    from src.database.models import get_session, Summary, ProcessedContent
     from src.mail_handling.sender import EmailSender
+    from src.summarize.generator import SummaryGenerator
 except ImportError as e:
     print(f"\nError importing required modules: {e}")
-    print("Please ensure all dependencies are installed.")
     sys.exit(1)
 
 # Set up logging
@@ -88,10 +89,87 @@ def send_pending_summaries(choice=None):
             
             print(f"\nFound {len(unsent_summaries)} unsent summaries.")
             
+            # If there's more than one summary, we should merge them
+            if len(unsent_summaries) > 1:
+                print(f"\nMerging {len(unsent_summaries)} summaries into a single email...")
+                
+                # Collect all summary texts
+                all_summary_texts = []
+                summary_ids = []
+                
+                # Filter out problematic summaries
+                problematic_indicators = [
+                    "NO MEANINGFUL NEWSLETTER CONTENT TO SUMMARIZE",
+                    "No meaningful content",
+                    "I'm unable to provide a newsletter summary",
+                    "content to summarize",
+                    "The only information provided is a subject line"
+                ]
+                
+                # Sort summaries by creation date, newest first
+                sorted_summaries = sorted(unsent_summaries, key=lambda x: x.creation_date or datetime.now(), reverse=True)
+                
+                for summary in sorted_summaries:
+                    # Skip problematic summaries
+                    if any(indicator in summary.summary_text for indicator in problematic_indicators):
+                        print(f"Skipping problematic summary ID {summary.id} - contains error messages")
+                        # Mark as sent so it doesn't get included again
+                        summary.sent = True
+                        summary.sent_date = datetime.now()
+                        continue
+                    
+                    # Skip empty summaries
+                    if not summary.summary_text or len(summary.summary_text.strip()) < 100:
+                        print(f"Skipping empty or very short summary ID {summary.id}")
+                        # Mark as sent so it doesn't get included again
+                        summary.sent = True
+                        summary.sent_date = datetime.now()
+                        continue
+                    
+                    all_summary_texts.append(summary.summary_text)
+                    summary_ids.append(summary.id)
+                
+                # If we've filtered out all summaries, bail out
+                if not all_summary_texts:
+                    print("\nAfter filtering, no valid summaries remain to send.")
+                    session.commit()
+                    return
+                
+                # Create a merged summary with clear section headers
+                merged_summary = "# LetterMonstr Combined Newsletter Summary\n\n"
+                
+                for i, summary_text in enumerate(all_summary_texts):
+                    # Only add section headers if there's more than one summary
+                    if len(all_summary_texts) > 1:
+                        merged_summary += f"## Summary {i+1}\n\n"
+                    
+                    merged_summary += summary_text.strip()
+                    if i < len(all_summary_texts) - 1:
+                        merged_summary += "\n\n" + "-" * 40 + "\n\n"
+                
+                # Now send the merged summary
+                print("\nSending merged summary...")
+                result = email_sender.send_summary(merged_summary)
+                
+                if result:
+                    print("Successfully sent merged summary")
+                    # Mark all summaries as sent
+                    for summary_id in summary_ids:
+                        print(f"Marking summary ID {summary_id} as sent...")
+                        summary = session.query(Summary).filter_by(id=summary_id).first()
+                        if summary:
+                            summary.sent = True
+                            summary.sent_date = datetime.now()
+                    session.commit()
+                else:
+                    print("Failed to send merged summary")
+                
+                return
+            
             # If a specific choice was provided via command line
             if choice is not None:
                 if choice.lower() == 'all':
-                    # Send all summaries
+                    # Send all summaries (just one at a time since we've already handled multiple summaries above)
                     print("\nSending all unsent summaries...")
                     for summary in unsent_summaries:
                         print(f"\nSending summary ID: {summary.id}...")
