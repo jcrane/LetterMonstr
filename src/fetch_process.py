@@ -308,6 +308,9 @@ class PeriodicFetcher:
                     # Generate content hash using the actual content
                     content_hash = self._generate_content_hash(processed_combined)
                     
+                    # Fix structure for summarizer compatibility
+                    processed_combined = ensure_summarizable_structure(processed_combined)
+                    
                     # Skip the regular processing and go directly to creating the ProcessedContent entry
                     logger.info(f"Using enhanced forwarded email processing for: {email['subject']}")
                     metadata = {
@@ -368,6 +371,9 @@ class PeriodicFetcher:
             
             # Generate content hash for deduplication
             content_hash = self._generate_content_hash(processed_combined)
+            
+            # Fix structure for summarizer compatibility
+            processed_combined = ensure_summarizable_structure(processed_combined)
             
             # Check if we already have this content
             existing = session.query(ProcessedContent).filter_by(content_hash=content_hash).first()
@@ -448,6 +454,24 @@ def load_config():
     except Exception as e:
         logger.error(f"Failed to load configuration: {e}")
         sys.exit(1)
+
+def ensure_summarizable_structure(content_dict):
+    """
+    Ensure the content dictionary has the proper structure for summarization.
+    The summarizer expects content in an email_content dictionary.
+    """
+    if not isinstance(content_dict, dict):
+        return content_dict
+        
+    # If there's no email_content but there is content, create the structure
+    if 'email_content' not in content_dict and 'content' in content_dict:
+        content_dict['email_content'] = {
+            'content': content_dict['content'],
+            'content_type': content_dict.get('content_type', 'text')
+        }
+        logger.debug("Added email_content structure for summarizer compatibility")
+    
+    return content_dict
 
 def run_periodic_fetch():
     """Run the periodic fetch and process."""
@@ -657,6 +681,9 @@ def process_single_email(session, email, fetcher):
             
             # Generate a unique hash for this forced processing
             content_hash = f"force_{uuid.uuid4().hex}"
+        
+        # Fix structure for summarizer compatibility
+        processed_combined = ensure_summarizable_structure(processed_combined)
         
         # Create metadata
         metadata = {
