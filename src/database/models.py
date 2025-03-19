@@ -6,6 +6,7 @@ import os
 from datetime import datetime
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, ForeignKey, text
 from sqlalchemy.orm import relationship, sessionmaker, declarative_base
+import sqlite3
 
 # Using declarative_base from sqlalchemy.orm instead of sqlalchemy.ext.declarative which is deprecated
 Base = declarative_base()
@@ -113,13 +114,28 @@ def init_db(db_path):
     # Ensure data directory exists
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     
+    # First set the SQLite pragmas using direct connection
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # Configure for better concurrency and performance
+    cursor.execute("PRAGMA journal_mode=WAL;")
+    cursor.execute("PRAGMA synchronous=NORMAL;")
+    cursor.execute("PRAGMA busy_timeout=120000;")  # 120 seconds (2 minutes)
+    cursor.execute("PRAGMA temp_store=MEMORY;")
+    cursor.execute("PRAGMA cache_size=-40000;")  # About 40MB
+    cursor.execute("PRAGMA foreign_keys=ON;")
+    conn.commit()
+    conn.close()
+    
     # Create engine with improved connection settings for concurrent access
     engine = create_engine(
         f'sqlite:///{db_path}', 
         connect_args={
             "check_same_thread": False,
-            "timeout": 30  # 30 second timeout for locked database
-        }
+            "timeout": 120  # 120 seconds timeout for locked database
+        },
+        isolation_level="SERIALIZABLE"  # Ensures transaction integrity
     )
     
     # Create tables
@@ -138,9 +154,13 @@ def get_session(db_path):
     Session = init_db(db_path)
     session = Session()
     
-    # Configure session for better concurrency using text() to properly format SQL
-    session.execute(text("PRAGMA journal_mode=WAL"))  # Write-Ahead Logging
-    session.execute(text("PRAGMA synchronous=NORMAL"))  # Faster with reasonable safety
-    session.execute(text("PRAGMA busy_timeout=30000"))  # 30 second timeout on locks
+    # Double-check that settings are applied in this specific session
+    session.execute(text("PRAGMA journal_mode=WAL;"))  # Write-Ahead Logging for better concurrency
+    session.execute(text("PRAGMA synchronous=NORMAL;"))  # Faster with reasonable safety
+    session.execute(text("PRAGMA busy_timeout=120000;"))  # 120 seconds (2 minutes)
+    session.execute(text("PRAGMA temp_store=MEMORY;"))  # Keep temporary tables in memory
+    session.execute(text("PRAGMA cache_size=-40000;"))  # About 40MB for caching
+    session.execute(text("PRAGMA foreign_keys=ON;"))  # Enforce foreign key constraints
+    session.execute(text("PRAGMA locking_mode=NORMAL;"))  # Allow multiple readers
     
     return session 

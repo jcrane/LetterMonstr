@@ -13,11 +13,14 @@ import logging
 import hashlib
 import time
 from datetime import datetime, timedelta
+import uuid
+import schedule
+from sqlalchemy import text
 
 # Add the project root to the Python path for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
-sys.path.insert(0, project_root)
+sys.path.append(project_root)
 
 # Import required modules
 import yaml
@@ -27,18 +30,18 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import components
-from src.mail_handling.fetcher import EmailFetcher
+from src.email_module.fetcher import EmailFetcher
 from src.mail_handling.parser import EmailParser
 from src.crawl.crawler import WebCrawler
 from src.summarize.processor import ContentProcessor
-from src.database.models import get_session, ProcessedEmail, ProcessedContent
+from src.database.models import get_session, ProcessedEmail, ProcessedContent, EmailContent, Link
 
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(project_root, 'data', 'lettermonstr_fetch.log')),
+        logging.FileHandler(os.path.join(project_root, 'data', 'lettermonstr.log')),
         logging.StreamHandler()
     ]
 )
@@ -134,188 +137,275 @@ class PeriodicFetcher:
             
             logger.info(f"Fetched {len(emails)} new emails")
             
-            # Process each email
-            session = get_session(self.db_path)
+            # Process each email - ONE AT A TIME to avoid database contention
+            logger.info(f"Beginning to process {len(emails)} emails one at a time")
+            successfully_processed = []
             
-            try:
-                # Track successfully processed emails
-                successfully_processed = []
-                
-                logger.info(f"Beginning to process {len(emails)} emails")
-                for idx, email in enumerate(emails):
-                    try:
-                        logger.info(f"Processing email {idx+1}/{len(emails)}: {email['subject']}")
-                        
-                        # Check if this is a forwarded email and flag it
-                        is_forwarded = email['subject'].startswith('Fwd:')
-                        if is_forwarded:
-                            logger.info(f"Detected forwarded email: {email['subject']}")
-                            # Add a flag to the email data for the parser to use
-                            email['is_forwarded'] = True
-                            
-                            # Pre-create the email record for forwarded emails to ensure we have an ID
-                            email_record = self._mark_email_as_processed_in_db(session, email)
-                            # Add the DB ID to the email data for the parser to use
-                            email['db_id'] = email_record.id
-                            logger.info(f"Pre-created database record for forwarded email, ID: {email_record.id}")
-                        
-                        # Parse email content
-                        parsed_content = self.email_parser.parse(email)
-                        
-                        if not parsed_content:
-                            logger.warning(f"No content could be parsed from email: {email['subject']}")
-                            # Try to extract at least something from the raw email content instead of using a minimal placeholder
-                            if is_forwarded:
-                                logger.info(f"Attempting to extract raw content for forwarded email: {email['subject']}")
-                                raw_content = email.get('content', {})
-                                
-                                # Check if we have any HTML or text content in the raw content
-                                html_content = raw_content.get('html', '')
-                                text_content = raw_content.get('text', '')
-                                
-                                if len(html_content) > 200:
-                                    logger.info(f"Using raw HTML content from email, length: {len(html_content)}")
-                                    parsed_content = {
-                                        'id': None,
-                                        'content': html_content,
-                                        'content_type': 'html',
-                                        'links': []
-                                    }
-                                elif len(text_content) > 200:
-                                    logger.info(f"Using raw text content from email, length: {len(text_content)}")
-                                    parsed_content = {
-                                        'id': None,
-                                        'content': text_content,
-                                        'content_type': 'text',
-                                        'links': []
-                                    }
-                                else:
-                                    # Only as a last resort, use the placeholder
-                                    logger.warning(f"No usable content found, using placeholder for forwarded email: {email['subject']}")
-                                    parsed_content = {
-                                        'id': None,
-                                        'content': f"[Forwarded email: {email['subject']}]",
-                                        'content_type': 'text',
-                                        'links': []
-                                    }
-                            else:
-                                continue
-                        
-                        # Extract and crawl links
-                        links = self.email_parser.extract_links(
-                            parsed_content.get('content', ''),
-                            parsed_content.get('content_type', 'html')
-                        )
-                        logger.info(f"Found {len(links)} links to crawl")
-                        
-                        # Crawl links
-                        crawled_content = self.web_crawler.crawl(links)
-                        logger.info(f"Crawled {len(crawled_content)} links successfully")
-                        
-                        # Combine email content with crawled content
-                        combined_content = {
-                            'source': email['subject'],
-                            'email_content': parsed_content,
-                            'crawled_content': crawled_content,
-                            'date': email['date']
-                        }
-                        
-                        # Apply initial processing to prepare for later deduplication
-                        try:
-                            # Use the correct method name
-                            processed_combined = self.content_processor.process_and_deduplicate([combined_content])
-                            # The method returns a list, so take the first item if available
-                            if processed_combined and len(processed_combined) > 0:
-                                processed_combined = processed_combined[0]
-                            else:
-                                # Fallback if processing returns empty
-                                processed_combined = combined_content
-                                logger.warning("Content processing returned empty result, using raw content")
-                        except Exception as e:
-                            logger.error(f"Error during content processing: {e}", exc_info=True)
-                            # Use the raw content as fallback
-                            processed_combined = combined_content
-                        
-                        # Generate content hash for deduplication
-                        content_hash = self._generate_content_hash(processed_combined)
-                        
-                        # Check if we already have this content
-                        existing = session.query(ProcessedContent).filter_by(content_hash=content_hash).first()
-                        
-                        if existing:
-                            logger.info(f"Content with hash {content_hash} already exists in database")
-                            # Mark email as processed but not read in Gmail
-                            self._mark_email_as_processed_in_db(session, email)
-                            successfully_processed.append(email)
-                            continue
-                        
-                        # Store processed content in database
-                        metadata = {
-                            'email_subject': email['subject'],
-                            'email_sender': email['sender'],
-                            'email_date': email['date'].isoformat() if isinstance(email['date'], datetime) else email['date'],
-                            'num_links': len(links),
-                            'num_crawled': len(crawled_content)
-                        }
-                        
-                        # Get or create email record - use existing record for forwarded emails
-                        email_record = None
-                        if is_forwarded and 'db_id' in email:
-                            # For forwarded emails, try to get the record we created earlier
-                            email_record = session.query(ProcessedEmail).get(email.get('db_id'))
-                            logger.info(f"Using existing DB record for forwarded email: {email['subject']}")
-                        
-                        if not email_record:
-                            # Create or update the email record in the database
-                            email_record = self._mark_email_as_processed_in_db(session, email)
-                            logger.debug(f"Created/updated email record with ID: {email_record.id}")
-                        
-                        # Create the processed content record
-                        processed_content = ProcessedContent(
-                            content_hash=content_hash,
-                            email_id=email_record.id,  # Set email_id directly
-                            source=email['subject'],
-                            content_type='combined',
-                            raw_content=json_serialize(combined_content),
-                            processed_content=json_serialize(processed_combined),
-                            content_metadata=json_serialize(metadata),
-                            date_processed=datetime.now(),
-                            summarized=False
-                        )
-                        
-                        try:
-                            session.add(processed_content)
-                            session.flush()  # Flush to get the ID
-                            logger.info(f"Stored processed content for email: {email['subject']} with ID: {processed_content.id}")
-                            successfully_processed.append(email)
-                        except Exception as e:
-                            logger.error(f"Error storing content for email {email['subject']}: {e}", exc_info=True)
-                            # Continue with the next email rather than aborting the whole batch
-                            continue
-                        
-                    except Exception as e:
-                        logger.error(f"Error processing email {email['subject']}: {e}", exc_info=True)
-                
-                # Commit all changes
-                session.commit()
-                logger.info(f"Successfully processed {len(successfully_processed)} emails")
-                
-                # Mark emails as read in Gmail if configured to do so
+            for idx, email in enumerate(emails):
+                # Create a new session for each email to ensure clean transactions
+                session = get_session(self.db_path)
+                try:
+                    logger.info(f"Processing email {idx+1}/{len(emails)}: {email['subject']}")
+                    
+                    # Process this single email with its own session and transaction
+                    processed = self._process_single_email(session, email)
+                    if processed:
+                        successfully_processed.append(email)
+                    
+                    # Commit the transaction 
+                    session.commit()
+                except Exception as e:
+                    logger.error(f"Error processing email {email['subject']}: {e}", exc_info=True)
+                    if hasattr(session, 'rollback'):
+                        session.rollback()
+                finally:
+                    # Always close the session to release locks
+                    session.close()
+            
+            logger.info(f"Successfully processed {len(successfully_processed)} emails")
+            
+            # Mark emails as read in Gmail if configured to do so
+            if successfully_processed:
                 if not self.config['email'].get('mark_read_only_after_summary', True):
                     self.email_fetcher.mark_emails_as_processed(successfully_processed)
                     logger.info(f"Marked {len(successfully_processed)} emails as read in Gmail")
                 else:
                     logger.info("Emails will remain unread in Gmail until summary is sent")
-                
-                # Update last fetch time
-                self.status["last_fetch"] = datetime.now().isoformat()
-                self._save_status()
-                
-            finally:
-                session.close()
-                
+            
+            # Update last fetch time
+            self.status["last_fetch"] = datetime.now().isoformat()
+            self._save_status()
+            
         except Exception as e:
             logger.error(f"Error during fetch and process: {e}", exc_info=True)
+    
+    def _process_single_email(self, session, email):
+        """Process a single email with proper transaction handling."""
+        try:
+            # Check if this is a forwarded email and flag it
+            is_forwarded = email['subject'].startswith('Fwd:')
+            if is_forwarded:
+                logger.info(f"Detected forwarded email: {email['subject']}")
+                # Add a flag to the email data for the parser to use
+                email['is_forwarded'] = True
+                
+                # Pre-create the email record for forwarded emails to ensure we have an ID
+                email_record = self._mark_email_as_processed_in_db(session, email)
+                # Add the DB ID to the email data for the parser to use
+                email['db_id'] = email_record.id
+                logger.info(f"Pre-created database record for forwarded email, ID: {email_record.id}")
+            
+            # Parse email content
+            parsed_content = self.email_parser.parse(email)
+            
+            if not parsed_content:
+                logger.warning(f"No content could be parsed from email: {email['subject']}")
+                # Try to extract at least something from the raw email content instead of using a minimal placeholder
+                if is_forwarded:
+                    logger.info(f"Attempting to extract raw content for forwarded email: {email['subject']}")
+                    raw_content = email.get('content', {})
+                    
+                    # Check if we have any HTML or text content in the raw content
+                    html_content = raw_content.get('html', '')
+                    text_content = raw_content.get('text', '')
+                    
+                    if len(html_content) > 200:
+                        logger.info(f"Using raw HTML content from email, length: {len(html_content)}")
+                        parsed_content = {
+                            'id': None,
+                            'content': html_content,
+                            'content_type': 'html',
+                            'links': []
+                        }
+                    elif len(text_content) > 200:
+                        logger.info(f"Using raw text content from email, length: {len(text_content)}")
+                        parsed_content = {
+                            'id': None,
+                            'content': text_content,
+                            'content_type': 'text',
+                            'links': []
+                        }
+                    else:
+                        # Only as a last resort, use the placeholder
+                        logger.warning(f"No usable content found, using placeholder for forwarded email: {email['subject']}")
+                        parsed_content = {
+                            'id': None,
+                            'content': f"[Forwarded email: {email['subject']}]",
+                            'content_type': 'text',
+                            'links': []
+                        }
+                else:
+                    return False
+            
+            # Extract and crawl links
+            links = self.email_parser.extract_links(
+                parsed_content.get('content', ''),
+                parsed_content.get('content_type', 'html')
+            )
+            logger.info(f"Found {len(links)} links to crawl")
+            
+            # Crawl links
+            crawled_content = self.web_crawler.crawl(links)
+            logger.info(f"Crawled {len(crawled_content)} links successfully")
+            
+            # Get content from existing email record in the database
+            email_record = None
+            if is_forwarded and 'db_id' in email:
+                # For forwarded emails, try to get the record we created earlier
+                email_record = session.query(ProcessedEmail).get(email.get('db_id'))
+                logger.info(f"Using existing DB record for forwarded email: {email['subject']}")
+                
+                # Special handling for forwarded emails - check if we have content in email_contents
+                email_content_entries = session.query(EmailContent).filter_by(email_id=email_record.id).all()
+                
+                if email_content_entries:
+                    # Use the actual content from email_contents table
+                    main_content = email_content_entries[0].content
+                    content_type = email_content_entries[0].content_type
+                    
+                    # Extract links from the actual content rather than using database records
+                    links = self.email_parser.extract_links(main_content, content_type)
+                    logger.info(f"Re-extracted {len(links)} links from the actual content")
+                    
+                    # Recrawl the newly extracted links
+                    if links:
+                        logger.info(f"Recrawling {len(links)} links from actual forwarded email content")
+                        crawled_content = self.web_crawler.crawl(links)
+                        logger.info(f"Recrawled {len(crawled_content)} links successfully")
+                    
+                    logger.info(f"Using actual content from email_contents for forwarded email: {email['subject']}, size: {len(main_content)} chars")
+                    
+                    # Create combined content with the actual email content
+                    combined_content = {
+                        'email_content': {
+                            'content': main_content,
+                            'content_type': content_type,
+                            'links': links
+                        },
+                        'crawled_content': crawled_content
+                    }
+                    
+                    # Process the content using the actual email content
+                    processed_combined = {
+                        'source': email['subject'],
+                        'date': email['date'].isoformat() if isinstance(email['date'], datetime) else email['date'],
+                        'content': main_content,  # Use the actual content from email_contents
+                        'links': links,
+                        'articles': []
+                    }
+                    
+                    # Update with crawled content if any
+                    if crawled_content:
+                        articles = []
+                        for item in crawled_content:
+                            articles.append({
+                                'title': item.get('title', ''),
+                                'url': item.get('url', ''),
+                                'content': item.get('clean_content', '')
+                            })
+                        processed_combined['articles'] = articles
+                    
+                    # Generate content hash using the actual content
+                    content_hash = self._generate_content_hash(processed_combined)
+                    
+                    # Skip the regular processing and go directly to creating the ProcessedContent entry
+                    logger.info(f"Using enhanced forwarded email processing for: {email['subject']}")
+                    metadata = {
+                        'email_subject': email['subject'],
+                        'email_sender': email['sender'],
+                        'email_date': email['date'].isoformat() if isinstance(email['date'], datetime) else email['date'],
+                        'num_links': len(links),
+                        'num_crawled': len(crawled_content),
+                        'enhanced_processing': True
+                    }
+                    
+                    # Create the ProcessedContent entry with the actual content
+                    processed_content = ProcessedContent(
+                        content_hash=content_hash,
+                        email_id=email_record.id,
+                        source=email['subject'],
+                        content_type='combined',
+                        raw_content=json_serialize(combined_content),
+                        processed_content=json_serialize(processed_combined),
+                        content_metadata=json_serialize(metadata),
+                        date_processed=datetime.now(),
+                        summarized=False
+                    )
+                    
+                    session.add(processed_content)
+                    session.flush()  # Flush to get the ID
+                    logger.info(f"Stored enhanced processed content for forwarded email: {email['subject']} with ID: {processed_content.id}")
+                    return True
+            
+            if not email_record:
+                # Create or update the email record in the database
+                email_record = self._mark_email_as_processed_in_db(session, email)
+                logger.debug(f"Created/updated email record with ID: {email_record.id}")
+            
+            # Combine email content with crawled content
+            combined_content = {
+                'source': email['subject'],
+                'email_content': parsed_content,
+                'crawled_content': crawled_content,
+                'date': email['date']
+            }
+            
+            # Apply initial processing to prepare for later deduplication
+            try:
+                # Use the correct method name
+                processed_combined = self.content_processor.process_and_deduplicate([combined_content])
+                # The method returns a list, so take the first item if available
+                if processed_combined and len(processed_combined) > 0:
+                    processed_combined = processed_combined[0]
+                else:
+                    # Fallback if processing returns empty
+                    processed_combined = combined_content
+                    logger.warning("Content processing returned empty result, using raw content")
+            except Exception as e:
+                logger.error(f"Error during content processing: {e}", exc_info=True)
+                # Use the raw content as fallback
+                processed_combined = combined_content
+            
+            # Generate content hash for deduplication
+            content_hash = self._generate_content_hash(processed_combined)
+            
+            # Check if we already have this content
+            existing = session.query(ProcessedContent).filter_by(content_hash=content_hash).first()
+            
+            if existing:
+                logger.info(f"Content with hash {content_hash} already exists in database")
+                return True
+            
+            # Store processed content in database
+            metadata = {
+                'email_subject': email['subject'],
+                'email_sender': email['sender'],
+                'email_date': email['date'].isoformat() if isinstance(email['date'], datetime) else email['date'],
+                'num_links': len(links),
+                'num_crawled': len(crawled_content)
+            }
+            
+            # Create the processed content record
+            processed_content = ProcessedContent(
+                content_hash=content_hash,
+                email_id=email_record.id,  # Set email_id directly
+                source=email['subject'],
+                content_type='combined',
+                raw_content=json_serialize(combined_content),
+                processed_content=json_serialize(processed_combined),
+                content_metadata=json_serialize(metadata),
+                date_processed=datetime.now(),
+                summarized=False
+            )
+            
+            session.add(processed_content)
+            session.flush()  # Flush to get the ID
+            logger.info(f"Stored processed content for email: {email['subject']} with ID: {processed_content.id}")
+            return True
+        
+        except Exception as e:
+            logger.error(f"Error processing single email {email['subject']}: {e}", exc_info=True)
+            return False
     
     def _mark_email_as_processed_in_db(self, session, email):
         """Mark an email as processed in the database without marking it as read in Gmail."""
@@ -393,160 +483,213 @@ def force_process_all_emails():
     
     logger.info(f"Found {len(emails)} unread emails to process")
     
-    # Process the emails
-    session = get_session(fetcher.db_path)
+    # Process the emails - one at a time to avoid database contention
+    successfully_processed = []
+    
+    for idx, email in enumerate(emails):
+        # Create a new session for each email
+        session = get_session(fetcher.db_path)
+        try:
+            logger.info(f"Force processing email {idx+1}/{len(emails)}: {email['subject']}")
+            
+            # Process this single email
+            processed = process_single_email(session, email, fetcher)
+            if processed:
+                successfully_processed.append(email)
+                
+            # Commit the transaction
+            session.commit()
+        except Exception as e:
+            logger.error(f"Error force processing email {email['subject']}: {e}", exc_info=True)
+            if hasattr(session, 'rollback'):
+                session.rollback()
+        finally:
+            # Always close the session
+            session.close()
+    
+    logger.info(f"Successfully force processed {len(successfully_processed)} emails")
+    
+    # Mark emails as read in Gmail if configured
+    if successfully_processed and config['email'].get('mark_read_after_force_process', True):
+        fetcher.email_fetcher.mark_emails_as_processed(successfully_processed)
+        logger.info(f"Marked {len(successfully_processed)} emails as read in Gmail")
+    
+    logger.info("Force processing completed")
+
+def process_single_email(session, email, fetcher):
+    """Process a single email with proper transaction handling for force processing."""
     try:
-        # Track successfully processed emails
-        successfully_processed = []
+        # Check if this is a forwarded email and flag it
+        is_forwarded = email['subject'].startswith('Fwd:')
+        if is_forwarded:
+            logger.info(f"Detected forwarded email: {email['subject']}")
+            email['is_forwarded'] = True
         
-        logger.info(f"Beginning to force process {len(emails)} emails")
-        for idx, email in enumerate(emails):
-            try:
-                logger.info(f"Force processing email {idx+1}/{len(emails)}: {email['subject']}")
+        # Create a fresh email record
+        email_record = fetcher._mark_email_as_processed_in_db(session, email)
+        email['db_id'] = email_record.id
+        logger.info(f"Created database record for email, ID: {email_record.id}")
+        
+        # Parse email content
+        parsed_content = fetcher.email_parser.parse(email)
+        if not parsed_content:
+            logger.warning(f"No content could be parsed from email: {email['subject']}")
+            return False
+        
+        # Extract links
+        links = fetcher.email_parser.extract_links(
+            parsed_content.get('content', ''),
+            parsed_content.get('content_type', 'html')
+        )
+        logger.info(f"Found {len(links)} links to crawl")
+        
+        # Crawl links
+        crawled_content = fetcher.web_crawler.crawl(links)
+        logger.info(f"Crawled {len(crawled_content)} links successfully")
+        
+        # Special handling for forwarded emails after they've been parsed
+        if is_forwarded:
+            # Check if we have content in email_contents table
+            email_content_entries = session.query(EmailContent).filter_by(email_id=email_record.id).all()
+            
+            if email_content_entries:
+                # Use the actual content from email_contents table
+                main_content = email_content_entries[0].content
+                content_type = email_content_entries[0].content_type
                 
-                # Check if this is a forwarded email and flag it
-                is_forwarded = email['subject'].startswith('Fwd:')
-                if is_forwarded:
-                    logger.info(f"Detected forwarded email: {email['subject']}")
-                    # Add a flag to the email data for the parser to use
-                    email['is_forwarded'] = True
-                    
-                # Always create a fresh email record for force processing
-                email_record = fetcher._mark_email_as_processed_in_db(session, email)
-                email['db_id'] = email_record.id
-                logger.info(f"Created/updated database record for email, ID: {email_record.id}")
+                # Extract links from the actual content rather than using database records
+                links = fetcher.email_parser.extract_links(main_content, content_type)
+                logger.info(f"Re-extracted {len(links)} links from the actual content")
                 
-                # Parse email content
-                parsed_content = fetcher.email_parser.parse(email)
+                # Recrawl the newly extracted links
+                if links:
+                    logger.info(f"Recrawling {len(links)} links from actual forwarded email content")
+                    crawled_content = fetcher.web_crawler.crawl(links)
+                    logger.info(f"Recrawled {len(crawled_content)} links successfully")
                 
-                if not parsed_content:
-                    logger.warning(f"No content could be parsed from email: {email['subject']}")
-                    # Try to extract at least something from the raw email content instead of using a minimal placeholder
-                    if is_forwarded:
-                        logger.info(f"Attempting to extract raw content for forwarded email: {email['subject']}")
-                        raw_content = email.get('content', {})
-                        
-                        # Check if we have any HTML or text content in the raw content
-                        html_content = raw_content.get('html', '')
-                        text_content = raw_content.get('text', '')
-                        
-                        if len(html_content) > 200:
-                            logger.info(f"Using raw HTML content from email, length: {len(html_content)}")
-                            parsed_content = {
-                                'id': None,
-                                'content': html_content,
-                                'content_type': 'html',
-                                'links': []
-                            }
-                        elif len(text_content) > 200:
-                            logger.info(f"Using raw text content from email, length: {len(text_content)}")
-                            parsed_content = {
-                                'id': None,
-                                'content': text_content,
-                                'content_type': 'text',
-                                'links': []
-                            }
-                        else:
-                            # Only as a last resort, use the placeholder
-                            logger.warning(f"No usable content found, using placeholder for forwarded email: {email['subject']}")
-                            parsed_content = {
-                                'id': None,
-                                'content': f"[Forwarded email: {email['subject']}]",
-                                'content_type': 'text',
-                                'links': []
-                            }
-                    else:
-                        continue
+                logger.info(f"Using actual content from email_contents for forced forwarded email: {email['subject']}, size: {len(main_content)} chars")
                 
-                # Extract and crawl links
-                links = fetcher.email_parser.extract_links(
-                    parsed_content.get('content', ''),
-                    parsed_content.get('content_type', 'html')
-                )
-                logger.info(f"Found {len(links)} links to crawl")
-                
-                # Crawl links
-                crawled_content = fetcher.web_crawler.crawl(links)
-                logger.info(f"Crawled {len(crawled_content)} links successfully")
-                
-                # Combine email content with crawled content
+                # Create combined content with the actual email content
                 combined_content = {
-                    'source': email['subject'],
-                    'email_content': parsed_content,
-                    'crawled_content': crawled_content,
-                    'date': email['date']
+                    'email_content': {
+                        'content': main_content,
+                        'content_type': content_type,
+                        'links': links
+                    },
+                    'crawled_content': crawled_content
                 }
                 
                 # Process the content
-                try:
-                    processed_combined = fetcher.content_processor.process_and_deduplicate([combined_content])
-                    if processed_combined and len(processed_combined) > 0:
-                        processed_combined = processed_combined[0]
-                    else:
-                        processed_combined = combined_content
-                        logger.warning("Content processing returned empty result, using raw content")
-                except Exception as e:
-                    logger.error(f"Error during content processing: {e}", exc_info=True)
-                    processed_combined = combined_content
-                
-                # Generate content hash
-                content_hash = fetcher._generate_content_hash(processed_combined)
-                
-                # Add "force" to content hash to avoid duplication with regular processing
-                force_hash = f"force_{content_hash}"
-                
-                # Store metadata
-                metadata = {
-                    'email_subject': email['subject'],
-                    'email_sender': email['sender'],
-                    'email_date': email['date'].isoformat() if isinstance(email['date'], datetime) else email['date'],
-                    'num_links': len(links),
-                    'num_crawled': len(crawled_content),
-                    'force_processed': True
+                processed_combined = {
+                    'source': email['subject'],
+                    'date': email['date'].isoformat() if isinstance(email['date'], datetime) else email['date'],
+                    'content': main_content,  # Use the actual content from email_contents
+                    'links': links,
+                    'articles': []
                 }
                 
-                # Create processed content entry
-                processed_content = ProcessedContent(
-                    content_hash=force_hash,
-                    email_id=email_record.id,
-                    source=email['subject'],
-                    content_type='combined',
-                    raw_content=json_serialize(combined_content),
-                    processed_content=json_serialize(processed_combined),
-                    content_metadata=json_serialize(metadata),
-                    date_processed=datetime.now(),
-                    summarized=False
-                )
+                # Update crawled articles
+                if crawled_content:
+                    articles = []
+                    for item in crawled_content:
+                        articles.append({
+                            'title': item.get('title', ''),
+                            'url': item.get('url', ''),
+                            'content': item.get('clean_content', '')
+                        })
+                    processed_combined['articles'] = articles
                 
-                try:
-                    session.add(processed_content)
-                    session.flush()
-                    
-                    logger.info(f"Stored forced processed content for email: {email['subject']} with ID: {processed_content.id}")
-                    successfully_processed.append(email)
-                except Exception as e:
-                    logger.error(f"Error storing forced processed content for email {email['subject']}: {e}", exc_info=True)
-                    session.rollback()  # Rollback this specific transaction
-                    continue  # Continue with the next email
+                # Generate a unique hash for this forced processing
+                content_hash = f"force_{uuid.uuid4().hex}"
+            else:
+                # Fallback to regular processing if no content in email_contents
+                combined_content = {
+                    'email_content': parsed_content,
+                    'crawled_content': crawled_content,
+                }
                 
-            except Exception as e:
-                logger.error(f"Error force processing email {email['subject']}: {e}", exc_info=True)
+                processed_combined = {
+                    'source': email['subject'],
+                    'date': email['date'].isoformat() if isinstance(email['date'], datetime) else email['date'],
+                    'content': parsed_content.get('content', ''),
+                    'links': links,
+                    'articles': [],
+                }
+                
+                # Update crawled articles
+                if crawled_content:
+                    articles = []
+                    for item in crawled_content:
+                        articles.append({
+                            'title': item.get('title', ''),
+                            'url': item.get('url', ''),
+                            'content': item.get('clean_content', '')
+                        })
+                    processed_combined['articles'] = articles
+                
+                # Generate a unique hash for this forced processing
+                content_hash = f"force_{uuid.uuid4().hex}"
+        else:
+            # Regular non-forwarded email processing
+            combined_content = {
+                'email_content': parsed_content,
+                'crawled_content': crawled_content,
+            }
+            
+            processed_combined = {
+                'source': email['subject'],
+                'date': email['date'].isoformat() if isinstance(email['date'], datetime) else email['date'],
+                'content': parsed_content.get('content', ''),
+                'links': links,
+                'articles': [],
+            }
+            
+            # Update crawled articles
+            if crawled_content:
+                articles = []
+                for item in crawled_content:
+                    articles.append({
+                        'title': item.get('title', ''),
+                        'url': item.get('url', ''),
+                        'content': item.get('clean_content', '')
+                    })
+                processed_combined['articles'] = articles
+            
+            # Generate a unique hash for this forced processing
+            content_hash = f"force_{uuid.uuid4().hex}"
         
-        # Commit changes
-        session.commit()
-        logger.info(f"Successfully force processed {len(successfully_processed)} emails")
+        # Create metadata
+        metadata = {
+            'email_subject': email['subject'],
+            'email_sender': email['sender'],
+            'email_date': email['date'].isoformat() if isinstance(email['date'], datetime) else email['date'],
+            'num_links': len(links),
+            'num_crawled': len(crawled_content),
+            'force_processed': True,
+            'is_forwarded': is_forwarded
+        }
         
-        # Mark emails as read in Gmail if configured
-        if config['email'].get('mark_read_after_force_process', True):
-            fetcher.email_fetcher.mark_emails_as_processed(successfully_processed)
-            logger.info(f"Marked {len(successfully_processed)} emails as read in Gmail")
+        # Create processed content entry
+        processed_content = ProcessedContent(
+            content_hash=content_hash,
+            email_id=email_record.id,
+            source=email['subject'],
+            content_type='combined',
+            raw_content=json_serialize(combined_content),
+            processed_content=json_serialize(processed_combined),
+            content_metadata=json_serialize(metadata),
+            date_processed=datetime.now(),
+            summarized=False
+        )
+        
+        session.add(processed_content)
+        session.flush()
+        logger.info(f"Stored forced processed content for email: {email['subject']} with ID: {processed_content.id}")
+        return True
         
     except Exception as e:
-        logger.error(f"Error during force processing: {e}", exc_info=True)
-    finally:
-        session.close()
-    
-    logger.info("Force processing completed")
+        logger.error(f"Error processing single email {email['subject']} in force mode: {e}", exc_info=True)
+        return False
 
 if __name__ == "__main__":
     run_periodic_fetch() 
