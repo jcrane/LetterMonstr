@@ -72,78 +72,101 @@ class EmailSender:
             return False
     
     def _create_email_message(self, summary_text):
-        """Create an email message with the summary content."""
-        # Create message container
+        """Create an email message with the summary."""
         msg = MIMEMultipart('alternative')
         
-        # Create subject line
-        current_date = datetime.now().strftime('%Y-%m-%d')
-        msg['Subject'] = f"{self.subject_prefix}Newsletter Summary {current_date}"
+        # Set email headers
         msg['From'] = self.sender_email
         msg['To'] = self.recipient_email
         
-        # Convert markdown to HTML
-        html_summary = self._markdown_to_html(summary_text)
+        # Set current date for the email
+        today = datetime.now()
+        current_date = today.strftime('%Y-%m-%d')
         
-        # Create HTML version of the message
+        # Create subject line
+        msg['Subject'] = f'[LetterMonstr] Newsletter Summary {current_date}'
+        
+        # Process summary text as HTML with improved formatting
+        # First check if summary_text already has HTML formatting
+        if '<html' in summary_text or '<body' in summary_text:
+            html = summary_text
+        else:
+            html = self._markdown_to_html(summary_text)
+        
+        # Create the complete HTML email with styling
         html = f"""
         <html>
-          <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <head>
             <style>
-              body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; color: #333; }}
-              h1 {{ color: #333366; margin-bottom: 20px; font-size: 24px; }}
-              h2 {{ color: #333366; margin-top: 25px; margin-bottom: 10px; font-size: 20px; }}
-              h3 {{ color: #555; margin-top: 20px; margin-bottom: 10px; font-size: 18px; }}
-              h4 {{ color: #555; margin-top: 15px; margin-bottom: 8px; font-size: 16px; }}
-              p {{ line-height: 1.6; margin-bottom: 15px; }}
-              .summary {{ line-height: 1.6; }}
-              .footer {{ margin-top: 30px; font-size: 12px; color: #666; border-top: 1px solid #ddd; padding-top: 20px; }}
-              a {{ color: #3366cc; text-decoration: none; }}
-              a:hover {{ text-decoration: underline; }}
-              ul {{ margin-left: 20px; padding-left: 15px; }}
-              li {{ margin-bottom: 10px; }}
-              hr {{ border: 0; height: 1px; background: #ddd; margin: 20px 0; }}
-              .source-links {{ 
-                margin-top: 5px; 
-                margin-bottom: 20px;
-                background: #f8f8f8; 
-                padding: 10px; 
-                border-left: 3px solid #ddd;
-                font-size: 14px;
-              }}
-              .source-links h4 {{ 
-                margin-top: 0; 
-                margin-bottom: 8px; 
-                font-size: 14px; 
-                color: #666;
-                font-weight: normal;
-              }}
-              .source-links a {{ 
-                display: block; 
-                margin-bottom: 5px; 
-                color: #555;
-                font-size: 13px;
-              }}
-              .source-link {{ 
-                color: #666; 
-                font-size: 13px; 
-                font-style: italic;
-                margin-left: 5px;
-              }}
+                body {{
+                    font-family: Arial, sans-serif;
+                    line-height: 1.4;
+                    color: #333333;
+                    max-width: 800px;
+                    margin: 0 auto;
+                    padding: 20px;
+                }}
+                h1, h2, h3, h4, h5, h6 {{
+                    color: #222222;
+                    margin-top: 20px;
+                    margin-bottom: 10px;
+                }}
+                h1 {{ font-size: 24px; }}
+                h2 {{ font-size: 22px; color: #0056b3; }}
+                h3 {{ font-size: 18px; color: #0056b3; }}
+                p {{ margin-bottom: 10px; }}
+                a {{ color: #0066cc; text-decoration: none; }}
+                a:hover {{ text-decoration: underline; }}
+                .source-link {{
+                    font-size: 14px;
+                    color: #666;
+                    display: block;
+                    margin-top: 5px;
+                    margin-bottom: 15px;
+                }}
+                a[href]:after {{
+                    content: attr(href);
+                    display: none;
+                }}
+                a:has(text="Read more"):after,
+                a:has(text="Read more →"):after {{
+                    content: " →";
+                }}
+                a:has(text="Read more") {{
+                    display: inline-block;
+                    margin-top: 8px;
+                    margin-bottom: 16px;
+                    font-weight: 500;
+                }}
+                hr {{ 
+                    border: 0;
+                    height: 1px;
+                    background: #ddd;
+                    margin: 20px 0;
+                }}
+                ul {{ 
+                    margin-top: 5px; 
+                    margin-bottom: 10px; 
+                    padding-left: 25px;
+                }}
+                li {{ margin-bottom: 5px; }}
+                .footer {{ 
+                    margin-top: 30px;
+                    padding-top: 10px;
+                    border-top: 1px solid #ddd;
+                    font-size: 12px;
+                    color: #777;
+                }}
             </style>
-          </head>
-          <body>
+        </head>
+        <body>
             <h1>LetterMonstr Newsletter Summary</h1>
-            <div class="summary">
-              {html_summary}
-            </div>
+            {html}
             <div class="footer">
-              <p>This summary was generated by LetterMonstr on {current_date}.</p>
-              <p>To change your delivery preferences, please update your configuration.</p>
+                <p>This summary was generated by LetterMonstr on {current_date}.</p>
+                <p>To change your delivery preferences, please update your configuration.</p>
             </div>
-          </body>
+        </body>
         </html>
         """
         
@@ -271,40 +294,53 @@ class EmailSender:
         # Handle paragraphs (lines followed by blank lines)
         html = re.sub(r'([^\n]+)\n\n', r'<p>\1</p>\n\n', html)
         
-        # Handle markdown links [text](url) and [Source: Title] format
+        # Preserve existing HTML links
+        # First identify existing <a> tags and replace with placeholders
+        links = []
+        
+        def save_link(match):
+            links.append(match.group(0))
+            return f"__LINK_PLACEHOLDER_{len(links)-1}__"
+            
+        html = re.sub(r'<a\s+href="[^"]*"[^>]*>[^<]*</a>', save_link, html)
+        
+        # Handle markdown links [text](url)
         html = re.sub(r'\[(.+?)\]\((.+?)\)', r'<a href="\2">\1</a>', html)
         
-        # Handle [Source: Title] format links
-        html = re.sub(r'\[Source: (.+?)\]', r'<a href="#" class="source-link">Source: \1</a>', html)
+        # Handle HTML link syntax that might be in text directly 
+        html = re.sub(r'<a href="([^"]*)"[^>]*>([^<]*)</a>', r'<a href="\1">\2</a>', html)
         
-        # Convert plain URLs to links, but only if they're not already in an <a> tag
-        url_pattern = r'(?<!href=")https?://[^\s<>"]+'
-        html = re.sub(url_pattern, lambda m: f'<a href="{m.group(0)}">{self._get_domain(m.group(0))}</a>', html)
+        # Make sure source links are properly formatted
+        html = re.sub(r'\[Source: ([^\]]+)\]', r'<a href="\1" class="source-link">Source: \1</a>', html)
         
-        # For source links blocks, create a special section
-        source_links_pattern = r'SOURCE LINKS:\n(.+?)(?:\n\n|\Z)'
+        # Ensure all URLs are proper links - make http URLs clickable
+        url_pattern = r'(?<!href=")(https?://[^\s<>"]+)'
+        html = re.sub(url_pattern, r'<a href="\1">\1</a>', html)
         
-        def format_source_links(match):
-            links_content = match.group(1)
-            links_html = '<div class="source-links">\n<h4>Sources</h4>\n'
-            
-            # Extract each link
-            link_matches = re.finditer(r'(ARTICLE|WEB VERSION): (.+?) - (https?://[^\s]+)', links_content)
-            for link_match in link_matches:
-                link_type = link_match.group(1)
-                link_title = link_match.group(2)
-                link_url = link_match.group(3)
-                links_html += f'<a href="{link_url}">{link_title}</a>\n'
-            
-            links_html += '</div>'
-            return links_html
+        # Restore original link placeholders
+        for i, link in enumerate(links):
+            placeholder = f"__LINK_PLACEHOLDER_{i}__"
+            html = html.replace(placeholder, link)
         
-        html = re.sub(source_links_pattern, format_source_links, html, flags=re.DOTALL)
+        # Convert remaining newlines to <br> tags, but avoid adding between HTML tags
+        # First split by lines
+        lines = html.split('\n')
         
-        # Convert remaining newlines to <br> tags
-        html = html.replace('\n', '<br>\n')
+        # Then join with <br> tags, skipping certain cases
+        result = ""
+        for i, line in enumerate(lines):
+            if i > 0:  # Skip adding <br> before the first line
+                # Don't add <br> after opening tags or before closing tags
+                if (line.strip().startswith('<') and not line.strip().startswith('</')) or \
+                   (i < len(lines)-1 and lines[i+1].strip().startswith('</')) or \
+                   line.strip() == '':
+                    result += '\n' + line
+                else:
+                    result += '<br>\n' + line
+            else:
+                result += line
         
-        return html
+        return result
     
     def _get_domain(self, url):
         """Extract domain name from URL for display purposes."""

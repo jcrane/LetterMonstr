@@ -193,6 +193,9 @@ class SummaryGenerator:
             # Add source links to the content
             if source_links:
                 item_text += "SOURCE LINKS:\n" + "\n".join(source_links) + "\n"
+                
+                # Also add a more explicit message about using these links for "Read more" links
+                item_text += "\nIMPORTANT: For the article summaries in this section, use the above URLs as 'Read more' links.\n"
             
             # Add to formatted content
             formatted_content.append(item_text)
@@ -222,26 +225,30 @@ Follow these guidelines:
 6. Remove any content that appears to be advertising or sponsored.
 7. Include important details like dates, statistics, and key findings.
 8. Present a balanced view without injecting your own opinions.
-9. Use plain text formatting that works well in Gmail and other email clients:
-   - Use UPPERCASE for main section headers (e.g., "AI NEWS AND UPDATES")
-   - Use CAPITALIZED section titles with underlines using equal signs for subsections (e.g., "Google's Gemma 3 Model" followed by "======================")
-   - Use asterisks (*) instead of bullet points
-   - Use indentation with spaces (4 spaces) for lists
-   - Use clear spacing between sections (double line breaks)
-   - Use dividers with dashes (-----) to separate major sections
+9. Use proper HTML formatting for email:
+   - Use <h2> tags for main section headers (e.g., "AI NEWS AND UPDATES")
+   - Use <h3> tags for subsections
+   - Use <ul> and <li> tags for lists
+   - Use compact spacing - avoid excessive blank lines between sections
+   - Use <hr> tags to separate major sections
 10. For EACH article or story from the newsletters, include a brief summary - don't skip any articles.
-11. IMPORTANT LINK FORMATTING: Include relevant source links for all articles, but place them at the END of each summary section, not at the beginning. Format links as "[Source: Title]" where Title is the publication or article name, and make them proper hyperlinks.
+11. IMPORTANT LINK FORMATTING: 
+   - After each summarized article or story, include a "Read more" link to the original article
+   - Format each link as: <a href="ACTUAL_URL">Read more →</a>
+   - Use the article URLs from the SOURCE LINKS section at the end of each content block
+   - Each summarized item should have its own "Read more" link that points to its specific source
+   - Place these links right after each article summary with minimal spacing
 12. If you find yourself omitting content due to length, create a separate "ADDITIONAL STORIES" section rather than leaving items out completely.
 
 The summary should be thorough and detailed, prioritizing completeness over brevity.
-Make sure to maintain all web links so readers can dive deeper into topics they find interesting, but place them at the end of content sections, not in the main text.
+Make sure all "Read more" links are properly formatted as HTML <a> tags so they're clickable in the email.
 
-IMPORTANT: Format the output to be easily readable in a plain-text email client. Do NOT use markdown or HTML formatting.
+IMPORTANT: Format for proper HTML email display. DO include HTML formatting and ensure all links are properly formatted as <a href="url">link text</a>.
 
 CONTENT TO SUMMARIZE:
 {content}
 
-Please provide a detailed and comprehensive summary of the above content, organized by topic and including ALL significant stories and articles with their relevant source links placed at the end of each content section.
+Please provide a detailed and comprehensive summary of the above content, organized by topic and including ALL significant stories and articles with proper "Read more" links after each summary item.
 """
         return prompt
     
