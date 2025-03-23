@@ -30,10 +30,10 @@ fi
 
 # Run the force process script to process unread emails
 echo "Step 1: Processing unread emails..."
-python3 ./force_process_unread.py
+python3 ./utils/email_tools/force_process_unread.py
 
 echo "Step 2: Generating and sending summary..."
-python3 ./send_pending_summaries.py
+python3 ./utils/summary_tools/send_pending_summaries.py
 
 echo "Force summary process completed!"
 

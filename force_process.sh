@@ -16,7 +16,7 @@ export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
 
 # Run the force process script
 echo "Running Force Process Unread Emails script..."
-python3 ./force_process_unread.py
+python3 ./utils/email_tools/force_process_unread.py
 
 # Deactivate virtual environment if it was activated
 if [ -n "$VIRTUAL_ENV" ]; then

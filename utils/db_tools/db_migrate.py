@@ -14,7 +14,7 @@ from datetime import datetime
 
 # Add the project root to the Python path for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(current_dir)
+project_root = os.path.dirname(os.path.dirname(current_dir))
 sys.path.insert(0, project_root)
 
 # Set up logging
