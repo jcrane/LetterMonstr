@@ -483,11 +483,15 @@ def run_periodic_fetch():
         logger.info("Periodic fetching is disabled in config")
         return
     
-    # Create and run the fetcher
-    fetcher = PeriodicFetcher(config)
-    fetcher.fetch_and_process()
-    
-    logger.info("Periodic fetch and process completed")
+    try:
+        # Create and run the fetcher
+        fetcher = PeriodicFetcher(config)
+        fetcher.fetch_and_process()
+        
+        logger.info("Periodic fetch and process completed")
+    except Exception as e:
+        logger.error(f"Error in periodic fetcher: {e}", exc_info=True)
+        # We don't want to crash the scheduler, so just log the error
 
 def force_process_all_emails():
     """Force process all unread emails, ignoring if they were previously processed."""

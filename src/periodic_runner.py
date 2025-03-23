@@ -12,7 +12,7 @@ import time
 import yaml
 import logging
 import schedule
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import text
 
 # Add the project root to the Python path for imports
@@ -65,9 +65,15 @@ def should_send_summary(config):
     # Parse delivery time
     delivery_hour, delivery_minute = map(int, delivery_time_str.split(':'))
     
+    # Get system time from multiple sources for debugging
+    system_time = time.localtime()
+    logger.info(f"Current time: {current_time}, System time: {time.strftime('%Y-%m-%d %H:%M:%S', system_time)}, Delivery time: {delivery_hour}:{delivery_minute}")
+    
     # Check if we're at or past the delivery time
     time_check = (current_time.hour > delivery_hour) or \
                  (current_time.hour == delivery_hour and current_time.minute >= delivery_minute)
+    
+    logger.info(f"Time check result: {time_check}")
     
     # Check if it's the right day based on frequency
     day_check = False
@@ -80,26 +86,40 @@ def should_send_summary(config):
         delivery_day = config['summary']['monthly_day']
         day_check = current_time.day == delivery_day
     
+    logger.info(f"Day check result for {frequency} frequency: {day_check}")
+    
     # If it's not the right time or day, don't send a summary
     if not (time_check and day_check):
+        logger.info(f"Not sending summary. time_check: {time_check}, day_check: {day_check}")
         return False
     
     # Check if we've already sent a summary today (regardless of whether it was forced or not)
     db_path = os.path.join(project_root, 'data', 'lettermonstr.db')
     session = get_session(db_path)
     try:
-        # Look for ANY summaries created today that were sent
-        today_date = current_time.strftime('%Y-%m-%d')
-        today_start = datetime.strptime(f"{today_date} 00:00:00", "%Y-%m-%d %H:%M:%S")
-        today_end = datetime.strptime(f"{today_date} 23:59:59", "%Y-%m-%d %H:%M:%S")
+        # Create date bounds for today
+        today_start = datetime(current_time.year, current_time.month, current_time.day, 0, 0, 0)
+        today_end = datetime(current_time.year, current_time.month, current_time.day, 23, 59, 59)
         
-        already_sent_today = session.query(Summary).filter(
+        logger.info(f"Checking for summaries between {today_start} and {today_end}, only non-forced summaries")
+        
+        # Check if there's any summary sent today at the scheduled time
+        recent_summaries = session.query(Summary).filter(
             Summary.sent == True,
-            Summary.sent_date.between(today_start, today_end)
-        ).count() > 0
+            Summary.sent_date >= today_start,
+            Summary.sent_date <= today_end,
+            Summary.is_forced == False  # Only look at scheduled summaries, not forced ones
+        ).order_by(Summary.creation_date.desc()).first()
         
-        logger.info(f"Already sent summary today: {already_sent_today}")
-        return not already_sent_today  # Send if we haven't already sent a summary today
+        already_sent_today = recent_summaries is not None
+        
+        if already_sent_today:
+            logger.info(f"Found a non-forced summary sent today: ID {recent_summaries.id}, sent at {recent_summaries.sent_date}")
+        else:
+            logger.info("No non-forced summaries found sent today")
+        
+        logger.info(f"Already sent scheduled summary today: {already_sent_today}")
+        return not already_sent_today  # Send if we haven't already sent a scheduled summary today
     except Exception as e:
         logger.error(f"Error checking for existing summaries: {e}", exc_info=True)
         return False  # If there's an error, be cautious and don't send
@@ -183,30 +203,35 @@ def generate_and_send_summary():
             
             logger.info(f"Database status: {processed_emails_count} processed emails, {total_content} total content items, {len(unsummarized)} unsummarized")
             
+            # If there's no unsummarized content, no need to continue
+            if not unsummarized:
+                logger.info("No unsummarized content to process")
+                return
+                
             # Initialize components
             content_processor = ContentProcessor(config['content'])
             summary_generator = SummaryGenerator(config['llm'])
             email_sender = EmailSender(config['summary'])
             email_fetcher = EmailFetcher(config['email'])
             
+            # Check if we've already sent a summary for recent content
+            yesterday = datetime.now() - timedelta(days=1)
+            recent_summaries = session.query(Summary).filter(
+                Summary.sent == True,
+                Summary.period_end >= yesterday
+            ).order_by(Summary.creation_date.desc()).first()
+            
+            # If we found a recent summary, just mark the content as summarized and exit
+            if recent_summaries is not None:
+                logger.info(f"Recent summary (ID: {recent_summaries.id}) already covers current content. Marking content as summarized.")
+                for item in unsummarized:
+                    item.summarized = True
+                session.commit()
+                logger.info(f"Marked {len(unsummarized)} content items as summarized without sending new summary")
+                return
+            
             # Flag to determine if we need to generate a new summary
             generate_new_summary = True
-            
-            # If we have no new content to summarize
-            if not unsummarized:
-                logger.info("No unsummarized content found")
-                
-                # If we have processed emails but no content, that could indicate a processing issue
-                if processed_emails_count > 0 and total_content == 0:
-                    logger.warning("There are processed emails but no content items - this may indicate an issue with email processing")
-                
-                # If we have existing unsent summaries, send those
-                if unsent_summaries:
-                    logger.info("Sending existing unsent summaries even though there's no new content")
-                    generate_new_summary = False
-                else:
-                    # No unsummarized content and no unsent summaries - nothing to do
-                    return
             
             if generate_new_summary:
                 logger.info(f"Processing {len(unsummarized)} unsummarized content items")
@@ -249,12 +274,105 @@ def generate_and_send_summary():
                 # Deduplicate and process content
                 final_content = content_processor.process_and_deduplicate(all_content)
                 
+                # Estimate token count (roughly 4 chars per token)
+                total_chars = sum(len(item.get('content', '')) for item in final_content)
+                estimated_tokens = total_chars // 4
+                logger.info(f"Estimated total tokens: {estimated_tokens}")
+                
+                # Set a safe batch limit (less than Claude's 200k limit)
+                TOKEN_BATCH_LIMIT = 100000
+                
                 # Generate summary
                 logger.info("Generating summary...")
-                summary_text = summary_generator.generate_summary(final_content)
                 
+                # Check if we need to batch the content
+                if estimated_tokens > TOKEN_BATCH_LIMIT:
+                    logger.info(f"Content too large ({estimated_tokens} tokens), splitting into batches...")
+                    
+                    # Sort content by date (newest first) to process most recent first
+                    sorted_content = sorted(final_content, key=lambda x: x.get('date', datetime.now()), reverse=True)
+                    
+                    batches = []
+                    current_batch = []
+                    current_batch_chars = 0
+                    
+                    # Create batches based on token estimates
+                    for item in sorted_content:
+                        item_chars = len(item.get('content', ''))
+                        item_tokens = item_chars // 4
+                        
+                        # If adding this item would exceed our limit, start a new batch
+                        if current_batch_chars // 4 + item_tokens > TOKEN_BATCH_LIMIT and current_batch:
+                            batches.append(current_batch)
+                            current_batch = [item]
+                            current_batch_chars = item_chars
+                        else:
+                            current_batch.append(item)
+                            current_batch_chars += item_chars
+                    
+                    # Add the last batch if it has items
+                    if current_batch:
+                        batches.append(current_batch)
+                    
+                    logger.info(f"Split content into {len(batches)} batches")
+                    
+                    # Generate summaries for each batch
+                    batch_summaries = []
+                    for i, batch in enumerate(batches):
+                        batch_tokens = sum(len(item.get('content', '')) for item in batch) // 4
+                        logger.info(f"Generating summary for batch {i+1}/{len(batches)} ({batch_tokens} tokens)...")
+                        try:
+                            batch_summary = summary_generator.generate_summary(batch)
+                            if batch_summary:
+                                batch_summaries.append(batch_summary)
+                                logger.info(f"Batch {i+1} summary generated successfully")
+                            else:
+                                logger.warning(f"Failed to generate summary for batch {i+1}")
+                        except Exception as e:
+                            logger.error(f"Error generating summary for batch {i+1}: {e}", exc_info=True)
+                            # Try with a smaller portion of the batch if possible
+                            if len(batch) > 1:
+                                logger.info(f"Attempting to generate summary with half of batch {i+1}...")
+                                half_size = len(batch) // 2
+                                try:
+                                    half_batch_summary = summary_generator.generate_summary(batch[:half_size])
+                                    if half_batch_summary:
+                                        batch_summaries.append(half_batch_summary)
+                                        logger.info(f"Generated summary for first half of batch {i+1}")
+                                    
+                                    # Try the second half too
+                                    second_half_summary = summary_generator.generate_summary(batch[half_size:])
+                                    if second_half_summary:
+                                        batch_summaries.append(second_half_summary)
+                                        logger.info(f"Generated summary for second half of batch {i+1}")
+                                except Exception as e2:
+                                    logger.error(f"Error generating summary for half of batch {i+1}: {e2}", exc_info=True)
+                    
+                    # Combine all batch summaries
+                    if batch_summaries:
+                        logger.info(f"Combining {len(batch_summaries)} batch summaries...")
+                        if len(batch_summaries) == 1:
+                            summary_text = batch_summaries[0]
+                        else:
+                            # Use the dedicated method to combine summaries
+                            summary_text = summary_generator.combine_summaries(batch_summaries)
+                        logger.info("Combined summary created successfully")
+                    else:
+                        logger.error("No batch summaries were generated")
+                        return
+                else:
+                    # Content is small enough to summarize in one go
+                    logger.info("Content size is within limits, generating summary in one call...")
+                    summary_text = summary_generator.generate_summary(final_content)
+                
+                # Check if summary generation failed or returned an error message
                 if not summary_text:
-                    logger.error("Failed to generate summary")
+                    logger.error("Failed to generate summary - empty result returned")
+                    return
+                    
+                # Check if the summary contains an error message
+                if summary_text.startswith("Error generating summary:"):
+                    logger.error(f"Summary generation returned an error: {summary_text}")
                     return
                 
                 # Check if summary actually contains meaningful content
@@ -462,8 +580,13 @@ def setup_scheduler():
     # Keep the scheduler running
     logger.info("Starting scheduler")
     while True:
-        schedule.run_pending()
-        time.sleep(60)
+        try:
+            schedule.run_pending()
+            time.sleep(60)
+        except Exception as e:
+            logger.error(f"Error in scheduler loop: {e}", exc_info=True)
+            # Wait before trying again to avoid excessive error logging
+            time.sleep(300)  # Wait 5 minutes before retrying
 
 if __name__ == "__main__":
     setup_scheduler() 

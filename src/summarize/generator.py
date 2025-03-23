@@ -178,6 +178,12 @@ class SummaryGenerator:
                     # Look for typical "View in browser" or "Web version" links
                     title = link.get('title', '').lower()
                     url = link.get('url', '')
+                    
+                    # Filter out tracking/redirect URLs
+                    if self._is_tracking_url(url):
+                        logger.warning(f"Skipping tracking URL: {url}")
+                        continue
+                        
                     if url and ('web' in title or 'browser' in title or 'view' in title):
                         source_links.append(f"WEB VERSION: {link.get('title', 'Web Version')} - {url}")
                         break
@@ -187,6 +193,12 @@ class SummaryGenerator:
             for article in articles:
                 article_url = article.get('url', '')
                 article_title = article.get('title', '')
+                
+                # Filter out tracking/redirect URLs
+                if self._is_tracking_url(article_url):
+                    logger.warning(f"Skipping tracking URL for article '{article_title}': {article_url}")
+                    continue
+                    
                 if article_url and article_title:
                     source_links.append(f"ARTICLE: {article_title} - {article_url}")
             
@@ -196,6 +208,7 @@ class SummaryGenerator:
                 
                 # Also add a more explicit message about using these links for "Read more" links
                 item_text += "\nIMPORTANT: For the article summaries in this section, use the above URLs as 'Read more' links.\n"
+                item_text += "DO NOT use any tracking URLs that contain 'beehiiv', 'mailchimp', 'constantcontact', etc. Only use direct article URLs.\n"
             
             # Add to formatted content
             formatted_content.append(item_text)
@@ -417,3 +430,46 @@ eliminating redundancy while preserving all significant content and links.
             for i, summary in enumerate(summaries):
                 fallback += f"## Batch {i+1} Summary\n\n{summary}\n\n---\n\n"
             return fallback 
+
+    def _is_tracking_url(self, url):
+        """Check if a URL is a tracking or redirect URL."""
+        if not url or not isinstance(url, str):
+            return False
+            
+        # List of known tracking/redirect domains
+        tracking_domains = [
+            'mail.beehiiv.com',
+            'link.mail.beehiiv.com',
+            'email.mailchimpapp.com',
+            'mailchi.mp',
+            'click.convertkit-mail.com',
+            'track.constantcontact.com',
+            'links.substack.com',
+            'tracking.mailerlite.com',
+            'sendgrid.net',
+            'email.mg.substack.com',
+            'url9934.notifications.substack.com',
+        ]
+        
+        # Check if the URL contains any of the tracking domains
+        for domain in tracking_domains:
+            if domain in url:
+                return True
+                
+        # Check for typical redirect URL patterns
+        redirect_patterns = [
+            '/redirect/', 
+            '/track/', 
+            '/click?', 
+            'utm_source=', 
+            'utm_medium=', 
+            'utm_campaign=',
+            'referrer=',
+            '/ss/c/',  # Beehiiv specific pattern
+        ]
+        
+        for pattern in redirect_patterns:
+            if pattern in url:
+                return True
+                
+        return False 
