@@ -369,11 +369,11 @@ class PeriodicFetcher:
                 # Use the raw content as fallback
                 processed_combined = combined_content
             
-            # Generate content hash for deduplication
-            content_hash = self._generate_content_hash(processed_combined)
-            
             # Fix structure for summarizer compatibility
             processed_combined = ensure_summarizable_structure(processed_combined)
+            
+            # Generate content hash for deduplication
+            content_hash = self._generate_content_hash(processed_combined)
             
             # Check if we already have this content
             existing = session.query(ProcessedContent).filter_by(content_hash=content_hash).first()

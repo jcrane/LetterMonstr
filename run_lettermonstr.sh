@@ -28,7 +28,7 @@ fi
 # Check if configuration exists
 if [ ! -f "config/config.yaml" ]; then
     echo "Configuration file not found. Running setup script..."
-    python3 setup_config.py
+    python3 utils/setup/setup_config.py
     
     # If setup failed, exit
     if [ $? -ne 0 ]; then
@@ -39,7 +39,7 @@ fi
 
 # Run database migration if needed
 echo "Running database migration..."
-python3 src/db_migrate.py
+python3 utils/db_tools/db_migrate.py
 
 # Check if periodic fetching is enabled in the config
 PERIODIC_FETCH=$(python3 -c "
