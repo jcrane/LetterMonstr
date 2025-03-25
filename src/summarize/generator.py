@@ -12,6 +12,7 @@ from datetime import datetime
 from anthropic import Anthropic
 
 from src.database.models import get_session, Summary
+from src.summarize.claude_summarizer import create_claude_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -181,8 +182,13 @@ class SummaryGenerator:
                     
                     # Filter out tracking/redirect URLs
                     if self._is_tracking_url(url):
-                        logger.warning(f"Skipping tracking URL: {url}")
-                        continue
+                        # Try to unwrap the tracking URL
+                        unwrapped_url = self._unwrap_tracking_url(url)
+                        if unwrapped_url:
+                            url = unwrapped_url
+                        else:
+                            logger.warning(f"Skipping tracking URL that couldn't be unwrapped: {url}")
+                            continue
                         
                     if url and ('web' in title or 'browser' in title or 'view' in title):
                         source_links.append(f"WEB VERSION: {link.get('title', 'Web Version')} - {url}")
@@ -194,10 +200,15 @@ class SummaryGenerator:
                 article_url = article.get('url', '')
                 article_title = article.get('title', '')
                 
-                # Filter out tracking/redirect URLs
+                # Filter out tracking/redirect URLs or unwrap them
                 if self._is_tracking_url(article_url):
-                    logger.warning(f"Skipping tracking URL for article '{article_title}': {article_url}")
-                    continue
+                    # Try to unwrap the tracking URL
+                    unwrapped_url = self._unwrap_tracking_url(article_url)
+                    if unwrapped_url:
+                        article_url = unwrapped_url
+                    else:
+                        logger.warning(f"Skipping tracking URL for article '{article_title}': {article_url}")
+                        continue
                     
                 if article_url and article_title:
                     source_links.append(f"ARTICLE: {article_title} - {article_url}")
@@ -225,10 +236,7 @@ class SummaryGenerator:
     
     def _create_summary_prompt(self, content):
         """Create a prompt for Claude to generate a summary."""
-        prompt = f"""
-You are a newsletter summarization assistant for the LetterMonstr application.
-Your task is to create a COMPREHENSIVE summary of the following newsletter content.
-
+        instructions = """
 Follow these guidelines:
 1. MOST IMPORTANT: Be thorough and comprehensive - include ALL meaningful content, stories, and insights from the source material.
 2. Do not omit any significant articles, stories or topics from the newsletters.
@@ -257,13 +265,9 @@ The summary should be thorough and detailed, prioritizing completeness over brev
 Make sure all "Read more" links are properly formatted as HTML <a> tags so they're clickable in the email.
 
 IMPORTANT: Format for proper HTML email display. DO include HTML formatting and ensure all links are properly formatted as <a href="url">link text</a>.
-
-CONTENT TO SUMMARIZE:
-{content}
-
-Please provide a detailed and comprehensive summary of the above content, organized by topic and including ALL significant stories and articles with proper "Read more" links after each summary item.
 """
-        return prompt
+        # Use the shared prompt generator with our specific instructions
+        return create_claude_prompt(instructions, content)
     
     def _call_claude_api(self, prompt):
         """Call Claude API to generate summary."""
@@ -375,8 +379,13 @@ Please provide a detailed and comprehensive summary of the above content, organi
         if len(summaries) == 1:
             return summaries[0]
         
-        # Create a prompt to combine the summaries
-        combined_prompt = f"""
+        # Format the summaries with separators
+        formatted_content = ""
+        for i, summary in enumerate(summaries):
+            formatted_content += f"\n{'==='*20}\n{summary}\n{'==='*20}\n\n"
+        
+        # Create instructions for combining summaries
+        instructions = """
 You are a newsletter summarization assistant for the LetterMonstr application.
 Your task is to combine multiple newsletter summaries into one comprehensive summary.
 
@@ -390,37 +399,14 @@ Please combine these summaries into a single coherent summary that:
 5. Keeps all relevant links
 6. Improves the overall flow and readability
 
-SUMMARIES TO COMBINE:
-
-{'==='*20}
-{summaries[0]}
-{'==='*20}
-
-{'==='*20}
-{summaries[1]}
-{'==='*20}
-
-"""
-        
-        # If there are more than 2 summaries, add them with separators
-        if len(summaries) > 2:
-            for i in range(2, len(summaries)):
-                combined_prompt += f"""
-{'==='*20}
-{summaries[i]}
-{'==='*20}
-
-"""
-        
-        # Complete the prompt
-        combined_prompt += """
 Please provide a single comprehensive and well-organized summary that combines all of the above information,
 eliminating redundancy while preserving all significant content and links.
 """
         
         try:
-            # Call Claude API
+            # Call Claude API with the combined prompt
             logger.info(f"Combining {len(summaries)} summaries into one")
+            combined_prompt = create_claude_prompt(instructions, formatted_content)
             combined_summary = self._call_claude_api(combined_prompt)
             return combined_summary
         except Exception as e:
@@ -429,7 +415,7 @@ eliminating redundancy while preserving all significant content and links.
             fallback = "# COMBINED NEWSLETTER SUMMARY\n\n"
             for i, summary in enumerate(summaries):
                 fallback += f"## Batch {i+1} Summary\n\n{summary}\n\n---\n\n"
-            return fallback 
+            return fallback
 
     def _is_tracking_url(self, url):
         """Check if a URL is a tracking or redirect URL."""
@@ -449,6 +435,13 @@ eliminating redundancy while preserving all significant content and links.
             'sendgrid.net',
             'email.mg.substack.com',
             'url9934.notifications.substack.com',
+            'tracking.tldrnewsletter.com',
+            'beehiiv.com',
+            'substack.com',
+            'mailchimp.com',
+            'convertkit.com',
+            'constantcontact.com',
+            'hubspotemail.net',
         ]
         
         # Check if the URL contains any of the tracking domains
@@ -466,10 +459,61 @@ eliminating redundancy while preserving all significant content and links.
             'utm_campaign=',
             'referrer=',
             '/ss/c/',  # Beehiiv specific pattern
+            'CL0/',    # TLDR newsletter pattern
+            'link.alphasignal.ai', # Another common newsletter service
         ]
         
         for pattern in redirect_patterns:
             if pattern in url:
                 return True
                 
-        return False 
+        return False
+
+    def _unwrap_tracking_url(self, url):
+        """Extract the actual destination URL from a tracking/redirect URL."""
+        if not url or not isinstance(url, str):
+            return url
+            
+        # Don't try to unwrap if it's not a tracking URL
+        if not self._is_tracking_url(url):
+            return url
+            
+        try:
+            # Handle TLDR newsletter style URLs
+            if 'tracking.tldrnewsletter.com/CL0/' in url:
+                # Extract the URL after CL0/
+                parts = url.split('CL0/', 1)
+                if len(parts) > 1:
+                    # The actual URL is everything after CL0/ and before an optional trailing parameter
+                    actual_url = parts[1].split('/', 1)[0] if '/' in parts[1] else parts[1]
+                    return actual_url
+                    
+            # Handle Beehiiv and similar trackers that might have the actual URL at the end
+            if 'link.mail.beehiiv.com/ss/c/' in url:
+                # For these complex URLs, sometimes we can't easily extract the destination
+                # Return None to indicate no reliable URL could be extracted
+                return None
+                
+            # Look for http or https in the URL, which often indicates the start of the actual destination
+            import re
+            embedded_urls = re.findall(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+', url)
+            
+            if embedded_urls:
+                # Get the last http(s) URL in the string, which is typically the destination
+                # Skip the first one if it's the tracking domain itself
+                for embedded_url in embedded_urls:
+                    # Skip if it's one of our known tracking domains
+                    is_tracking = any(domain in embedded_url for domain in [
+                        'beehiiv.com', 'substack.com', 'mailchimp.com', 
+                        'tracking.tldrnewsletter.com', 'link.mail.beehiiv.com'
+                    ])
+                    
+                    if not is_tracking:
+                        return embedded_url
+                        
+            # If we can't extract a clear URL, return None
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error unwrapping tracking URL {url}: {e}", exc_info=True)
+            return None 

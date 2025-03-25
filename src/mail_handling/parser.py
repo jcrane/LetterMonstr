@@ -161,69 +161,83 @@ class EmailParser:
                 session.close()
     
     def extract_links(self, content, content_type='html'):
-        """Extract links from email content."""
+        """Extract links from content."""
         links = []
-        seen_urls = set()  # Track seen URLs to avoid duplicates
         
         try:
-            if content_type == 'html':
-                try:
-                    # Parse HTML content with BeautifulSoup
-                    # Add explicit type checking to handle Python 3.13 issues
-                    if not isinstance(content, str):
-                        content = str(content) if content is not None else ""
+            if content_type.lower() == 'html':
+                # Parse HTML and extract links
+                soup = BeautifulSoup(content, 'html.parser')
+                
+                # Find all anchor tags
+                for a_tag in soup.find_all('a'):
+                    # Extract URL
+                    url = a_tag.get('href', '')
                     
-                    soup = BeautifulSoup(content, 'html.parser')
+                    # Skip empty URLs
+                    if not url:
+                        continue
                     
-                    # Find all links
-                    for a_tag in soup.find_all('a', href=True):
-                        href = a_tag['href'].strip()
-                        text = a_tag.get_text().strip()
-                        
-                        # Skip mailto links
-                        if href.startswith('mailto:'):
-                            continue
-                            
-                        # Skip image links
-                        if href.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg')):
-                            continue
-                        
-                        # Accept any http/https URL
-                        if href.startswith('http') or href.startswith('https') or href.startswith('www'):
-                            if href not in seen_urls:
-                                seen_urls.add(href)
-                                links.append({
-                                    'url': href,
-                                    'title': text if text else href
-                                })
-                except Exception as bs_error:
-                    logger.error(f"BeautifulSoup HTML parsing failed: {bs_error}")
-                    # Fall back to regex extraction
-                    links.extend(self._extract_links_with_regex(content))
+                    # Process tracking URLs
+                    if self._is_tracking_url(url):
+                        unwrapped_url = self._unwrap_tracking_url(url)
+                        if unwrapped_url and unwrapped_url != url:
+                            logger.info(f"Unwrapped tracking URL: {url} -> {unwrapped_url}")
+                            url = unwrapped_url
+                    
+                    # Skip invalid URLs
+                    if not self._is_valid_url(url):
+                        continue
+                    
+                    # Extract title from the anchor text
+                    title = a_tag.get_text(strip=True)
+                    
+                    # If no title, try the title attribute
+                    if not title:
+                        title = a_tag.get('title', '')
+                    
+                    # If still no title, use "Link" as placeholder
+                    if not title:
+                        title = "Link"
+                    
+                    # Add to links list
+                    links.append({
+                        'url': url,
+                        'title': title,
+                        'source': 'html',
+                        'original_url': a_tag.get('href', '')  # Store the original URL
+                    })
             else:
-                # Extract links from text content using regex
+                # For plain text, use regex to extract URLs
                 links = self._extract_links_with_regex(content)
-            
-            # If we haven't found any links, try harder with more permissive regex
-            if not links:
-                logger.info("No links found with standard methods, trying more aggressive extraction")
-                # Look for anything that could be a URL in the text
-                text_content = soup.get_text() if 'soup' in locals() else content
-                url_pattern = r'https?://[^\s<>"\']+|www\.[^\s<>"\']+'
-                urls = re.findall(url_pattern, text_content)
                 
-                for url in urls:
-                    if url not in seen_urls:
-                        seen_urls.add(url)
-                        links.append({
-                            'url': url,
-                            'title': url
-                        })
-                
-                if links:
-                    logger.info(f"Found {len(links)} links using aggressive extraction")
+                # Process tracking URLs in plain text links too
+                for link in links:
+                    url = link.get('url', '')
+                    if self._is_tracking_url(url):
+                        unwrapped_url = self._unwrap_tracking_url(url)
+                        if unwrapped_url and unwrapped_url != url:
+                            logger.info(f"Unwrapped tracking URL in plain text: {url} -> {unwrapped_url}")
+                            link['url'] = unwrapped_url
+                            link['original_url'] = url  # Store the original URL
             
-            return links
+            # Deduplicate links
+            unique_links = []
+            seen_urls = set()
+            
+            for link in links:
+                url = link.get('url', '').strip()
+                
+                # Skip if we've seen this URL already
+                if url in seen_urls:
+                    continue
+                
+                # Add to seen set and unique links
+                seen_urls.add(url)
+                unique_links.append(link)
+            
+            logger.info(f"Extracted {len(unique_links)} unique links from content")
+            return unique_links
             
         except Exception as e:
             logger.error(f"Error extracting links: {e}", exc_info=True)
@@ -380,6 +394,108 @@ class EmailParser:
             return (result.scheme in ['http', 'https'] and result.netloc) or (not result.scheme and result.netloc.startswith("www."))
         except:
             return False
+    
+    def _is_tracking_url(self, url):
+        """Check if a URL is a tracking or redirect URL."""
+        if not url or not isinstance(url, str):
+            return False
+            
+        # List of known tracking/redirect domains
+        tracking_domains = [
+            'mail.beehiiv.com',
+            'link.mail.beehiiv.com',
+            'email.mailchimpapp.com',
+            'mailchi.mp',
+            'click.convertkit-mail.com',
+            'track.constantcontact.com',
+            'links.substack.com',
+            'tracking.mailerlite.com',
+            'sendgrid.net',
+            'email.mg.substack.com',
+            'tracking.tldrnewsletter.com',
+            'beehiiv.com',
+            'substack.com',
+            'mailchimp.com',
+            'convertkit.com',
+            'constantcontact.com',
+            'hubspotemail.net',
+            'alphasignal.ai',
+        ]
+        
+        # Check if the URL contains any of the tracking domains
+        for domain in tracking_domains:
+            if domain in url:
+                return True
+                
+        # Check for typical redirect URL patterns
+        redirect_patterns = [
+            '/redirect/', 
+            '/track/', 
+            '/click?', 
+            'utm_source=', 
+            'utm_medium=', 
+            'utm_campaign=',
+            'referrer=',
+            '/ss/c/',  # Beehiiv specific pattern
+            'CL0/',    # TLDR newsletter pattern
+        ]
+        
+        for pattern in redirect_patterns:
+            if pattern in url:
+                return True
+                
+        return False
+        
+    def _unwrap_tracking_url(self, url):
+        """Extract the actual destination URL from a tracking/redirect URL."""
+        if not url or not isinstance(url, str):
+            return url
+            
+        # Don't try to unwrap if it's not a tracking URL
+        if not self._is_tracking_url(url):
+            return url
+            
+        try:
+            # Handle TLDR newsletter style URLs
+            if 'tracking.tldrnewsletter.com/CL0/' in url:
+                # Extract the URL after CL0/
+                parts = url.split('CL0/', 1)
+                if len(parts) > 1:
+                    # The actual URL is everything after CL0/ and before an optional trailing parameter
+                    actual_url = parts[1].split('/', 1)[0] if '/' in parts[1] else parts[1]
+                    return actual_url
+                    
+            # Handle Beehiiv trackers
+            if 'link.mail.beehiiv.com/ss/c/' in url:
+                # For beehiiv URLs, let's try to extract any embedded URLs
+                import re
+                embedded_urls = re.findall(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+', url)
+                
+                # Get the last URL in the string, which is most likely to be the destination
+                # but filter out known tracking domains
+                if embedded_urls:
+                    for embedded_url in embedded_urls:
+                        if not any(domain in embedded_url for domain in [
+                            'beehiiv.com', 'substack.com', 'mailchimp.com'
+                        ]):
+                            return embedded_url
+                
+            # For other tracking URLs, try to find an embedded URL
+            import re
+            embedded_urls = re.findall(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+', url)
+            
+            if embedded_urls:
+                # Filter out known tracking domains
+                for embedded_url in embedded_urls:
+                    if not self._is_tracking_url(embedded_url):
+                        return embedded_url
+                        
+            # If we can't extract a clear URL, return the original
+            return url
+            
+        except Exception as e:
+            logger.error(f"Error unwrapping tracking URL {url}: {e}")
+            return url
     
     def _get_email_id(self, session, message_id):
         """Get the database ID for a processed email."""

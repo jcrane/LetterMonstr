@@ -579,14 +579,43 @@ def setup_scheduler():
     
     # Keep the scheduler running
     logger.info("Starting scheduler")
+    last_check_time = time.time()
+    
     while True:
         try:
+            current_time = time.time()
+            time_diff = current_time - last_check_time
+            
+            # If more than 5 minutes have passed since last check,
+            # it's likely the system was sleeping
+            if time_diff > 300:  # 5 minutes in seconds
+                logger.info(f"Detected possible system sleep: {time_diff:.1f} seconds since last check")
+                logger.info("Running periodic fetch immediately to catch up")
+                
+                # Run tasks immediately to catch up after sleep
+                run_periodic_fetch()
+                
+                # Also check if we need to send a summary
+                generate_and_send_summary()
+                
+                # Calculate and log how many scheduled runs were missed
+                missed_fetch_runs = int(time_diff / (fetch_interval * 3600))
+                missed_summary_checks = int(time_diff / (15 * 60))
+                
+                if missed_fetch_runs > 0 or missed_summary_checks > 0:
+                    logger.info(f"Estimated missed runs during sleep: {missed_fetch_runs} fetch runs, {missed_summary_checks} summary checks")
+            
+            # Normal scheduler operation
             schedule.run_pending()
+            last_check_time = time.time()
             time.sleep(60)
+            
         except Exception as e:
             logger.error(f"Error in scheduler loop: {e}", exc_info=True)
             # Wait before trying again to avoid excessive error logging
             time.sleep(300)  # Wait 5 minutes before retrying
+            # Update last_check_time even after an error
+            last_check_time = time.time()
 
 if __name__ == "__main__":
     setup_scheduler() 

@@ -72,6 +72,20 @@ class EmailFetcher:
                 else:
                     raise
     
+    def check_connection(self, mail):
+        """Check if the IMAP connection is still alive and reconnect if needed."""
+        try:
+            # Try a simple NOOP command to check connection
+            status, response = mail.noop()
+            if status == 'OK':
+                return mail
+            else:
+                logger.warning("Connection check failed, attempting to reconnect")
+                return self.connect()
+        except Exception as e:
+            logger.warning(f"Connection error: {e}, attempting to reconnect")
+            return self.connect()
+    
     def fetch_new_emails(self):
         """Fetch unread emails from the configured folders."""
         mail = self.connect()
@@ -86,6 +100,9 @@ class EmailFetcher:
             
             # Process each folder
             for folder in self.folders:
+                # Before each folder, ensure connection is still good
+                mail = self.check_connection(mail)
+                
                 # Select the mailbox/folder
                 mail.select(folder)
                 
@@ -108,6 +125,10 @@ class EmailFetcher:
                 
                 # Process each email
                 for e_id in email_ids:
+                    # Before each email fetch, check connection again if we've processed a lot
+                    if len(all_emails) > 0 and len(all_emails) % 10 == 0:
+                        mail = self.check_connection(mail)
+                    
                     # Fetch the email
                     status, msg_data = mail.fetch(e_id, '(RFC822)')
                     
@@ -136,8 +157,11 @@ class EmailFetcher:
                         processed_email_ids.append((e_id, parsed_email))
             
             # Close the connection
-            mail.close()
-            mail.logout()
+            try:
+                mail.close()
+                mail.logout()
+            except Exception as e:
+                logger.warning(f"Error closing mail connection: {e}")
             
             # Return the list of fetched emails
             logger.info(f"Successfully fetched {len(all_emails)} new unread emails for processing")
@@ -145,6 +169,10 @@ class EmailFetcher:
             
         except Exception as e:
             logger.error(f"Error fetching emails: {e}", exc_info=True)
+            try:
+                mail.logout()
+            except:
+                pass
             raise
         finally:
             session.close()
