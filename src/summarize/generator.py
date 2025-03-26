@@ -479,6 +479,52 @@ eliminating redundancy while preserving all significant content and links.
             return url
             
         try:
+            # Special handling for beehiiv URLs which often don't contain the actual destination
+            # in an easily extractable format - these URLs are challenging to unwrap
+            if 'beehiiv.com' in url or 'link.mail.beehiiv.com' in url:
+                logger.info(f"Found beehiiv tracking URL: {url}")
+                
+                # For beehiiv, we need to check if we can find an embedded destination URL
+                # using multiple patterns as beehiiv formats vary
+                
+                # Try pattern 1: URLs sometimes contain a parameter with the destination
+                if 'redirect=' in url:
+                    parts = url.split('redirect=', 1)
+                    if len(parts) > 1:
+                        destination = parts[1]
+                        if '&' in destination:
+                            destination = destination.split('&', 1)[0]
+                        if destination.startswith('http'):
+                            logger.info(f"Extracted beehiiv destination URL from redirect param: {destination}")
+                            return destination
+                
+                # Try pattern 2: Look for patterns like /to/ followed by a URL
+                if '/to/' in url:
+                    parts = url.split('/to/', 1)
+                    if len(parts) > 1:
+                        destination = parts[1]
+                        if destination.startswith('http'):
+                            logger.info(f"Extracted beehiiv destination URL from /to/ pattern: {destination}")
+                            return destination
+                
+                # Try to find any embedded URLs in the beehiiv link - this is a fallback
+                import re
+                url_pattern = r'https?://(?!link\.mail\.beehiiv\.com|beehiiv\.com)(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
+                embedded_urls = re.findall(url_pattern, url)
+                
+                if embedded_urls:
+                    # Get the last URL which is most likely to be the destination
+                    destination = embedded_urls[-1]
+                    logger.info(f"Extracted beehiiv destination URL using regex: {destination}")
+                    return destination
+                
+                # If we can't extract a URL, log this and consider fetching the URL to resolve the redirect
+                logger.warning(f"Could not extract destination from beehiiv URL: {url}")
+                
+                # At this point we can't reliably extract the destination, so we should 
+                # omit this link from the summary rather than showing a tracking URL
+                return None
+            
             # Handle TLDR newsletter style URLs
             if 'tracking.tldrnewsletter.com/CL0/' in url:
                 # Extract the URL after CL0/
@@ -487,13 +533,7 @@ eliminating redundancy while preserving all significant content and links.
                     # The actual URL is everything after CL0/ and before an optional trailing parameter
                     actual_url = parts[1].split('/', 1)[0] if '/' in parts[1] else parts[1]
                     return actual_url
-                    
-            # Handle Beehiiv and similar trackers that might have the actual URL at the end
-            if 'link.mail.beehiiv.com/ss/c/' in url:
-                # For these complex URLs, sometimes we can't easily extract the destination
-                # Return None to indicate no reliable URL could be extracted
-                return None
-                
+            
             # Look for http or https in the URL, which often indicates the start of the actual destination
             import re
             embedded_urls = re.findall(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+', url)

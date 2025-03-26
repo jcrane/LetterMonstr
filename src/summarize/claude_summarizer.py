@@ -23,14 +23,28 @@ Each item is separated by "{item_separator}".
 
 {instructions}
 
-URL HANDLING:
-1. Include links to original articles with "Read more →" links if original URLs are provided.
-2. NEVER include tracking/redirect URLs that contain domains like beehiiv.com, mailchimp.com, substack.com, etc. in your summary.
-3. Only use direct article URLs provided in the "SOURCE LINKS" section.
-4. For each link, verify that the URL doesn't contain tracking domains before including it.
-5. If no direct URL is available, omit the "Read more" link entirely.
-6. Never make up URLs or include links that aren't explicitly provided in the source content.
-7. The system has attempted to convert tracking URLs to direct URLs, but if you see any remaining tracking URLs (containing domains like beehiiv.com, tracking.tldrnewsletter.com, etc.), DO NOT use them.
+URL HANDLING - EXTREMELY IMPORTANT:
+1. ALWAYS include links to original articles with "Read more →" links for each summarized article.
+2. For each article you summarize, add a properly formatted link: <a href="ACTUAL_URL">Read more →</a>
+3. Use ONLY the direct article URLs provided in the "SOURCE LINKS" section at the end of each content block.
+4. Do not include tracking/redirect URLs that contain domains like:
+   - beehiiv.com
+   - link.mail.beehiiv.com
+   - mailchimp.com
+   - substack.com
+   - tracking.tldrnewsletter.com
+   - any URL with '/ss/c/' in it
+   - any URL with 'CL0/' in it
+5. For each article, check the "SOURCE LINKS" section and use the matching URL for the "Read more" link.
+6. Every article you summarize should have its own "Read more" link unless no valid source URL is available.
+7. The system has already processed and cleaned the content to remove most tracking URLs, ads, and unnecessary elements.
+8. Position each "Read more" link directly after its corresponding article summary.
+
+CONTENT QUALITY NOTES:
+1. The system has automatically cleaned the content to remove most ads, tracking elements, and extraneous content.
+2. Focus on the high-quality information that remains after cleaning.
+3. The content has been processed to improve readability and remove noise.
+4. HTML elements like scripts, styles, iframes, and common ad containers have been removed.
 
 Here are the email newsletters:
 

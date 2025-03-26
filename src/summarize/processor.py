@@ -251,4 +251,63 @@ class ContentProcessor:
             if self._is_similar(article.get('content', ''), existing_article.get('content', '')):
                 return True
         
-        return False 
+        return False
+    
+    def clean_content(self, content, content_type='html'):
+        """Clean and format content for processing.
+        
+        Args:
+            content (str): The content to clean
+            content_type (str): The type of content ('html' or 'text')
+            
+        Returns:
+            str: The cleaned content
+        """
+        if not content:
+            return ""
+            
+        try:
+            if content_type.lower() == 'html':
+                # Use BeautifulSoup to clean HTML
+                try:
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(content, 'html.parser')
+                    
+                    # Remove script, style, and ad-related elements
+                    for element in soup(["script", "style", "iframe", "ins", "aside"]):
+                        element.extract()
+                    
+                    # Remove common ad containers
+                    for ad_class in ['ad', 'ads', 'advertisement', 'banner', 'sponsored', 'promotion']:
+                        for element in soup.find_all(class_=lambda c: c and ad_class in c.lower()):
+                            element.extract()
+                    
+                    # Extract text with proper spacing
+                    lines = []
+                    for element in soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li']):
+                        text = element.get_text(strip=True)
+                        if text:
+                            lines.append(text)
+                    
+                    # Join lines with newlines based on element type
+                    cleaned_text = '\n\n'.join(lines)
+                    
+                    # Clean up any excessive whitespace
+                    cleaned_text = '\n'.join(line.strip() for line in cleaned_text.splitlines() if line.strip())
+                    
+                    return cleaned_text
+                    
+                except Exception as e:
+                    logger.error(f"Error cleaning HTML content: {e}")
+                    # Fall back to simpler text extraction
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(content, 'html.parser')
+                    return soup.get_text(separator='\n')
+            else:
+                # For plain text, just clean up whitespace
+                lines = [line.strip() for line in content.splitlines() if line.strip()]
+                return '\n'.join(lines)
+                
+        except Exception as e:
+            logger.error(f"Error in clean_content: {e}")
+            return content  # Return original content on error 

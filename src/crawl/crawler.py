@@ -113,7 +113,7 @@ class WebCrawler:
             soup = BeautifulSoup(html_content, 'html.parser')
             
             # Extract title
-            title = soup.title.string if soup.title else ''
+            title = self._extract_title(soup)
             
             # Extract meta description
             meta_desc = ''
@@ -153,6 +153,29 @@ class WebCrawler:
                 'raw_html': html_content,
                 'clean_text': ''
             }
+    
+    def _extract_title(self, soup):
+        """Extract title from BeautifulSoup object."""
+        if not soup:
+            return ""
+            
+        # Try to find title tag
+        title_tag = soup.find('title')
+        if title_tag and title_tag.text:
+            return title_tag.text.strip()
+            
+        # Try h1 if no title tag or empty title
+        h1_tag = soup.find('h1')
+        if h1_tag and h1_tag.text:
+            return h1_tag.text.strip()
+            
+        # Try meta title
+        meta_title = soup.find('meta', property='og:title')
+        if meta_title and meta_title.get('content'):
+            return meta_title['content'].strip()
+            
+        # Fallback to empty string
+        return ""
     
     def _clean_text(self, text):
         """Clean extracted text content."""
@@ -241,4 +264,69 @@ class WebCrawler:
         except Exception as e:
             logger.error(f"Error storing crawled content: {e}", exc_info=True)
             session.rollback()
-            return None 
+            return None
+    
+    def resolve_redirect(self, url):
+        """Follow redirects and return the final URL.
+        
+        This method makes a HEAD request (or GET if needed) to follow redirects
+        and return the final destination URL.
+        """
+        if not url:
+            return None
+            
+        try:
+            logger.info(f"Following redirects for URL: {url}")
+            
+            # Prepare headers with user agent
+            headers = {'User-Agent': self.user_agent}
+            
+            # Try with a HEAD request first (faster, doesn't download content)
+            try:
+                response = requests.head(
+                    url, 
+                    headers=headers,
+                    allow_redirects=True,
+                    timeout=self.timeout
+                )
+                
+                # If successful, return the final URL
+                if response.status_code == 200:
+                    final_url = response.url
+                    if final_url != url:
+                        logger.info(f"Redirect followed: {url} -> {final_url}")
+                    return final_url
+            except Exception as e:
+                logger.debug(f"HEAD request failed for {url}: {e}")
+                
+            # If HEAD failed, try with GET
+            response = requests.get(
+                url, 
+                headers=headers,
+                allow_redirects=True,
+                timeout=self.timeout,
+                stream=True  # Don't download the entire content
+            )
+            
+            # Close the connection before processing
+            response.close()
+            
+            # Get the final URL after redirects
+            final_url = response.url
+            
+            if final_url != url:
+                logger.info(f"Redirect followed: {url} -> {final_url}")
+                
+            return final_url
+            
+        except Exception as e:
+            logger.error(f"Error resolving redirect for {url}: {e}")
+            return url  # Return original URL if we can't resolve
+            
+    def _is_ad_content(self, content, title):
+        """Check if content looks like an advertisement."""
+        # Check title first - quicker
+        if title:
+            for keyword in self.ad_keywords:
+                if keyword.lower() in title.lower():
+                    return True 

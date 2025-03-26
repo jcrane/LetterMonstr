@@ -37,6 +37,7 @@ class EmailFetcher:
         self.lookback_days = config['initial_lookback_days']
         self.db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 
                                 'data', 'lettermonstr.db')
+        self._mail = None  # Store the IMAP connection
     
     def connect(self):
         """Connect to the IMAP server."""
@@ -47,13 +48,13 @@ class EmailFetcher:
             try:
                 logger.info(f"Connecting to {self.server}:{self.port} (attempt {attempt+1}/{max_retries})")
                 # Create an IMAP4 class with SSL
-                mail = imaplib.IMAP4_SSL(self.server, self.port)
+                self._mail = imaplib.IMAP4_SSL(self.server, self.port)
                 
                 # Login to the server
-                mail.login(self.email, self.password)
+                self._mail.login(self.email, self.password)
                 
                 logger.info(f"Successfully connected to {self.server}")
-                return mail
+                return self._mail
                 
             except socket.gaierror as e:
                 logger.error(f"DNS resolution error connecting to server: {e}")
@@ -72,9 +73,16 @@ class EmailFetcher:
                 else:
                     raise
     
-    def check_connection(self, mail):
+    def check_connection(self, mail=None):
         """Check if the IMAP connection is still alive and reconnect if needed."""
         try:
+            # Use stored connection if none provided
+            mail = mail or self._mail
+            
+            if not mail:
+                logger.warning("No IMAP connection found, creating new connection")
+                return self.connect()
+            
             # Try a simple NOOP command to check connection
             status, response = mail.noop()
             if status == 'OK':
@@ -160,6 +168,7 @@ class EmailFetcher:
             try:
                 mail.close()
                 mail.logout()
+                self._mail = None  # Clear stored connection
             except Exception as e:
                 logger.warning(f"Error closing mail connection: {e}")
             
@@ -171,6 +180,7 @@ class EmailFetcher:
             logger.error(f"Error fetching emails: {e}", exc_info=True)
             try:
                 mail.logout()
+                self._mail = None  # Clear stored connection
             except:
                 pass
             raise

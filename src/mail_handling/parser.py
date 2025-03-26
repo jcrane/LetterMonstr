@@ -178,13 +178,6 @@ class EmailParser:
                     if not url:
                         continue
                     
-                    # Process tracking URLs
-                    if self._is_tracking_url(url):
-                        unwrapped_url = self._unwrap_tracking_url(url)
-                        if unwrapped_url and unwrapped_url != url:
-                            logger.info(f"Unwrapped tracking URL: {url} -> {unwrapped_url}")
-                            url = unwrapped_url
-                    
                     # Skip invalid URLs
                     if not self._is_valid_url(url):
                         continue
@@ -200,26 +193,26 @@ class EmailParser:
                     if not title:
                         title = "Link"
                     
+                    # Check if this is a tracking URL
+                    is_tracking = self._is_tracking_url(url)
+                    
                     # Add to links list
                     links.append({
                         'url': url,
                         'title': title,
                         'source': 'html',
-                        'original_url': a_tag.get('href', '')  # Store the original URL
+                        'is_tracking': is_tracking,  # Flag tracking URLs for later resolution
+                        'original_url': url          # Store the original URL regardless
                     })
             else:
                 # For plain text, use regex to extract URLs
                 links = self._extract_links_with_regex(content)
                 
-                # Process tracking URLs in plain text links too
+                # Flag tracking URLs in plain text links too
                 for link in links:
                     url = link.get('url', '')
-                    if self._is_tracking_url(url):
-                        unwrapped_url = self._unwrap_tracking_url(url)
-                        if unwrapped_url and unwrapped_url != url:
-                            logger.info(f"Unwrapped tracking URL in plain text: {url} -> {unwrapped_url}")
-                            link['url'] = unwrapped_url
-                            link['original_url'] = url  # Store the original URL
+                    link['is_tracking'] = self._is_tracking_url(url)
+                    link['original_url'] = url
             
             # Deduplicate links
             unique_links = []
