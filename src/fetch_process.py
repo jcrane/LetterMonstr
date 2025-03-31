@@ -182,10 +182,23 @@ class PeriodicFetcher:
     def _process_single_email(self, session, email):
         """Process a single email with proper transaction handling."""
         try:
-            # Check if this is a forwarded email and flag it
-            is_forwarded = email['subject'].startswith('Fwd:')
-            if is_forwarded:
-                logger.info(f"Detected forwarded email: {email['subject']}")
+            # Enhanced forwarded email detection
+            is_forwarded = False
+            subject = email.get('subject', '')
+            
+            # Check various indicators that this might be a forwarded email
+            if (subject.startswith('Fwd:') or 
+                'forwarded message' in subject.lower() or 
+                ('content' in email and isinstance(email['content'], dict) and
+                 (('html' in email['content'] and 
+                   ("---------- Forwarded message ---------" in email['content'].get('html', '') or
+                    "Begin forwarded message:" in email['content'].get('html', '') or
+                    "border:none;border-top:solid #B5C4DF" in email['content'].get('html', ''))) or
+                  ('text' in email['content'] and
+                   ("---------- Forwarded message ---------" in email['content'].get('text', '') or
+                    "Begin forwarded message:" in email['content'].get('text', '')))))):
+                is_forwarded = True
+                logger.info(f"Detected forwarded email: {subject}")
                 # Add a flag to the email data for the parser to use
                 email['is_forwarded'] = True
                 
@@ -194,6 +207,13 @@ class PeriodicFetcher:
                 # Add the DB ID to the email data for the parser to use
                 email['db_id'] = email_record.id
                 logger.info(f"Pre-created database record for forwarded email, ID: {email_record.id}")
+                
+                # Include raw message if available
+                if 'raw_message' in email:
+                    logger.info("Forwarding raw message data to parser")
+                    # No need to do anything else, just make sure it's included
+                elif 'raw_content' in email:
+                    logger.info("Forwarding raw content data to parser")
             
             # Parse email content
             parsed_content = self.email_parser.parse(email)
@@ -202,26 +222,15 @@ class PeriodicFetcher:
                 logger.warning(f"Failed to parse email: {email['subject']}")
                 return False
                 
-            # Extract text and HTML content
-            text_content = parsed_content.get('text', '')
-            html_content = parsed_content.get('html', '')
-            
-            # Use HTML content if available, otherwise fall back to text
-            if html_content:
-                content_type = 'html'
-                content = html_content
-            else:
-                content_type = 'text'
-                content = text_content
+            # Get content and type directly from parsed_content
+            content = parsed_content.get('content', '')
+            content_type = parsed_content.get('content_type', '')
+            links = parsed_content.get('links', [])
                 
             if not content:
                 logger.warning(f"No content extracted from email: {email['subject']}")
                 return False
                 
-            # Extract links from the content
-            links = self.email_parser.extract_links(content, content_type)
-            logger.info(f"Extracted {len(links)} links from email: {email['subject']}")
-            
             # Generate or use DB ID for the email
             if not is_forwarded:  # For forwarded emails, we already have the ID
                 # Mark the email as processed in the database
@@ -238,20 +247,28 @@ class PeriodicFetcher:
             self._extract_link_content(email_id, content_type, content, links, session)
             
             # Extract processed content entries for deduplication and future summarization
-            for content_source in [
-                {'type': content_type, 'content': content, 'is_full_email': True}
-            ]:
-                # Process each content source
-                self._process_content_source(
-                    session, 
-                    content_source['content'],
-                    content_source['type'],
-                    email_id,
-                    email['subject'],
-                    email.get('date'),
-                    content_source.get('is_full_email', False),
-                    email,  # Pass the full email data
-                )
+            content_source = {
+                'type': content_type,
+                'content': content,
+                'is_full_email': True,
+                'links': links
+            }
+            
+            # Process the content source
+            processed_content_entry = self._process_content_source(
+                session, 
+                content_source['content'],
+                content_source['type'],
+                email_id,
+                email['subject'],
+                email.get('date'),
+                content_source.get('is_full_email', False),
+                parsed_content  # Pass the full parsed content
+            )
+            
+            if not processed_content_entry:
+                logger.warning(f"Failed to create processed content entry for email: {email['subject']}")
+                return False
             
             logger.info(f"Successfully processed email: {email['subject']}")
             return True
@@ -421,9 +438,11 @@ class PeriodicFetcher:
             # Create content entry
             content_entry = EmailContent(
                 email_id=email_id,
-                content_type=content_type,
-                content=content
+                content_type=content_type
             )
+            
+            # Use the set_content method to properly handle different data types
+            content_entry.set_content(content)
             
             session.add(content_entry)
             session.flush()  # Get ID without committing
@@ -489,25 +508,15 @@ class PeriodicFetcher:
                 logger.info(f"Content already exists with hash: {content_hash}")
                 return existing
                 
-            # Create metadata
-            metadata = {
-                'email_subject': subject,
-                'email_date': date.isoformat() if isinstance(date, datetime) else date,
-                'is_full_email': is_full_email,
-                'content_type': content_type
-            }
-            
             # Create ProcessedContent entry
             processed_content = ProcessedContent(
                 content_hash=content_hash,
                 email_id=email_id,
                 source=subject,
                 content_type=content_type,
-                raw_content=content,
                 processed_content=json_serialize(processed_item),
-                content_metadata=json_serialize(metadata),
                 date_processed=datetime.now(),
-                summarized=False
+                is_summarized=False
             )
             
             session.add(processed_content)
@@ -519,6 +528,66 @@ class PeriodicFetcher:
         except Exception as e:
             logger.error(f"Error processing content source: {e}", exc_info=True)
             return None
+
+    def _process_emails(self, emails, gmail_service=None):
+        """Process new emails and extract content"""
+        logger.info(f"Processing {len(emails)} emails")
+        processed_count = 0
+        
+        fetcher = EmailFetcher(self.config)
+        parser = EmailParser()
+        
+        for email in emails:
+            try:
+                # Get email details
+                message_id = email['id']
+                
+                # Skip if already processed
+                if self._is_email_processed(message_id):
+                    logger.debug(f"Email {message_id} already processed, skipping.")
+                    continue
+                    
+                # Get full message
+                message_data = fetcher.get_email_by_id(message_id, gmail_service)
+                
+                # Parse email content
+                email_data = parser.parse(message_data)
+                
+                # Save email to database
+                email_id = fetcher.mark_email_as_processed(email_data, message_id)
+                
+                # Extract content and content type
+                content = email_data.get('content', '')
+                content_type = email_data.get('content_type', 'text')
+                
+                # Extract links
+                links = email_data.get('links', [])
+                
+                # Store email content
+                session = get_session(self.db_path)
+                try:
+                    # Store content separately
+                    fetcher._store_email_content(email_id, content_type, content, links, session)
+                    
+                    # Process content for summarization
+                    subject = email_data.get('subject', 'No Subject')
+                    date = email_data.get('date', datetime.now())
+                    self._process_content_source(session, content, content_type, email_id, subject, date, 
+                                              is_full_email=True, email_data=email_data)
+                    
+                    session.commit()
+                except Exception as e:
+                    logger.error(f"Error storing/processing content: {e}", exc_info=True)
+                    session.rollback()
+                finally:
+                    session.close()
+                
+                processed_count += 1
+                
+            except Exception as e:
+                logger.error(f"Error processing email {email.get('id', 'unknown')}: {e}", exc_info=True)
+        
+        return processed_count
 
 def load_config():
     """Load configuration from YAML file."""
@@ -782,11 +851,9 @@ def process_single_email(session, email, fetcher):
             email_id=email_record.id,
             source=email['subject'],
             content_type='combined',
-            raw_content=json_serialize(combined_content),
             processed_content=json_serialize(processed_combined),
-            content_metadata=json_serialize(metadata),
             date_processed=datetime.now(),
-            summarized=False
+            is_summarized=False
         )
         
         session.add(processed_content)

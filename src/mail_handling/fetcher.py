@@ -20,7 +20,7 @@ project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
 # Import database models
-from src.database.models import get_session, ProcessedEmail
+from src.database.models import get_session, ProcessedEmail, EmailContent
 
 logger = logging.getLogger(__name__)
 
@@ -579,4 +579,54 @@ class EmailFetcher:
         except Exception as e:
             if hasattr(session, 'rollback'):
                 session.rollback()
-            logger.error(f"Error marking email as processed: {e}", exc_info=True) 
+            logger.error(f"Error marking email as processed: {e}", exc_info=True)
+    
+    def _store_email_content(self, email_data, email_id):
+        """Store email content in the database"""
+        try:
+            session = get_session(self.db_path)
+            
+            # Store HTML content if available
+            if 'html_content' in email_data:
+                html_content = EmailContent(
+                    email_id=email_id,
+                    content_type='html'
+                )
+                html_content.set_content(email_data['html_content'])
+                session.add(html_content)
+                
+            # Store text content if available
+            if 'text_content' in email_data:
+                text_content = EmailContent(
+                    email_id=email_id,
+                    content_type='text'
+                )
+                text_content.set_content(email_data['text_content'])
+                session.add(text_content)
+                
+            # Store raw content if available
+            if 'original_full_message' in email_data:
+                raw_content = EmailContent(
+                    email_id=email_id, 
+                    content_type='raw'
+                )
+                raw_content.set_content(email_data['original_full_message'])
+                session.add(raw_content)
+                
+            # Store main content if available (this could be a dict or complex structure)
+            if 'main_content' in email_data:
+                main_content = EmailContent(
+                    email_id=email_id,
+                    content_type='main'
+                )
+                main_content.set_content(email_data['main_content'])
+                session.add(main_content)
+                
+            session.commit()
+            logger.debug(f"Successfully stored content for email ID: {email_id}")
+        except Exception as e:
+            logger.error(f"Error storing email content: {e}")
+            session.rollback()
+            raise
+        finally:
+            session.close() 

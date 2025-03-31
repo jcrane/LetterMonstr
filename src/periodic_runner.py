@@ -56,8 +56,13 @@ def load_config():
         logger.error(f"Failed to load configuration: {e}")
         sys.exit(1)
 
-def should_send_summary(config):
+def should_send_summary(config, force=False):
     """Determine if it's time to send a summary based on configuration."""
+    # If force is True, bypass all time checks
+    if force:
+        logger.info("Force flag is set, bypassing time checks")
+        return True
+        
     current_time = datetime.now()
     frequency = config['summary']['frequency']
     delivery_time_str = config['summary']['delivery_time']
@@ -67,13 +72,24 @@ def should_send_summary(config):
     
     # Get system time from multiple sources for debugging
     system_time = time.localtime()
-    logger.info(f"Current time: {current_time}, System time: {time.strftime('%Y-%m-%d %H:%M:%S', system_time)}, Delivery time: {delivery_hour}:{delivery_minute}")
+    # Format delivery time with leading zero for minutes
+    formatted_delivery_time = f"{delivery_hour:02d}:{delivery_minute:02d}"
+    logger.info(f"Current time: {current_time}, System time: {time.strftime('%Y-%m-%d %H:%M:%S', system_time)}, Delivery time: {formatted_delivery_time}")
     
-    # Check if we're at or past the delivery time
-    time_check = (current_time.hour > delivery_hour) or \
-                 (current_time.hour == delivery_hour and current_time.minute >= delivery_minute)
+    # Create today's delivery time for comparison
+    todays_delivery_time = datetime(
+        current_time.year, 
+        current_time.month, 
+        current_time.day, 
+        delivery_hour, 
+        delivery_minute
+    )
     
-    logger.info(f"Time check result: {time_check}")
+    # Check if we're past today's delivery time but before midnight
+    time_check = current_time >= todays_delivery_time and \
+                 current_time.date() == todays_delivery_time.date()
+    
+    logger.info(f"Time check result: {time_check} (comparing {current_time} with today's delivery time {todays_delivery_time})")
     
     # Check if it's the right day based on frequency
     day_check = False
@@ -132,11 +148,11 @@ def has_content_to_summarize():
     session = get_session(db_path)
     try:
         # Get unsummarized content
-        unsummarized_count = session.query(ProcessedContent).filter_by(summarized=False).count()
+        unsummarized_count = session.query(ProcessedContent).filter_by(is_summarized=False).count()
         
         # If we have unsummarized content, we can generate a summary
         if unsummarized_count > 0:
-            return True
+            return True, unsummarized_count, total_content
         
         # If no unsummarized content, check if we have any content at all
         total_content = session.query(ProcessedContent).count()
@@ -151,10 +167,10 @@ def has_content_to_summarize():
             logger.info("Temporarily marking all content as unsummarized to ensure complete summary")
             
             # Update all content to be unsummarized
-            session.query(ProcessedContent).update({ProcessedContent.summarized: False})
+            session.query(ProcessedContent).update({ProcessedContent.is_summarized: False})
             session.commit()
             
-            return True
+            return True, total_content, total_content
             
         # No content to summarize
         return False
@@ -164,7 +180,7 @@ def has_content_to_summarize():
     finally:
         session.close()
 
-def generate_and_send_summary():
+def generate_and_send_summary(force=False):
     """Generate and send summary at scheduled time."""
     logger.info("Checking if it's time to generate and send summary...")
     
@@ -172,7 +188,7 @@ def generate_and_send_summary():
     config = load_config()
     
     # Check if it's time to send a summary
-    if not should_send_summary(config):
+    if not should_send_summary(config, force):
         logger.info("Not time to send summary yet")
         return
     
@@ -195,7 +211,7 @@ def generate_and_send_summary():
                 logger.info(f"Found {len(unsent_summaries)} existing unsent summaries")
             
             # Get all unsummarized content
-            unsummarized = session.query(ProcessedContent).filter_by(summarized=False).all()
+            unsummarized = session.query(ProcessedContent).filter_by(is_summarized=False).all()
             
             # Get total count for debugging
             total_content = session.query(ProcessedContent).count()
@@ -225,7 +241,7 @@ def generate_and_send_summary():
             if recent_summaries is not None:
                 logger.info(f"Recent summary (ID: {recent_summaries.id}) already covers current content. Marking content as summarized.")
                 for item in unsummarized:
-                    item.summarized = True
+                    item.is_summarized = True
                 session.commit()
                 logger.info(f"Marked {len(unsummarized)} content items as summarized without sending new summary")
                 return
@@ -401,7 +417,7 @@ def generate_and_send_summary():
                     logger.warning("Not sending summary email as there is no meaningful content to summarize")
                     # Update status but don't send email
                     for item in unsummarized:
-                        item.summarized = True
+                        item.is_summarized = True
                     session.commit()
                     logger.info(f"Marked {len(unsummarized)} empty content items as summarized without sending email")
                     return
@@ -493,7 +509,7 @@ def generate_and_send_summary():
                     
                     # Mark all content as summarized
                     for item in unsummarized:
-                        item.summarized = True
+                        item.is_summarized = True
                     
                     # Mark emails as read in Gmail
                     if emails_to_mark and config['email'].get('mark_read_after_summarization', True):
@@ -522,7 +538,7 @@ def generate_and_send_summary():
                     
                     # Mark all content as summarized
                     for item in unsummarized:
-                        item.summarized = True
+                        item.is_summarized = True
                     
                     # Mark emails as read in Gmail
                     if emails_to_mark and config['email'].get('mark_read_after_summarization', True):
@@ -617,5 +633,37 @@ def setup_scheduler():
             # Update last_check_time even after an error
             last_check_time = time.time()
 
+def main():
+    """Main entry point for the periodic runner."""
+    # Load configuration
+    config = load_config()
+    
+    # Check if force flag is passed
+    force = len(sys.argv) > 1 and sys.argv[1] == '--force'
+    
+    if force:
+        logger.info("Force flag detected, generating summary immediately")
+        generate_and_send_summary(force=True)
+        
+    # Set up periodic tasks
+    if config['email'].get('periodic_fetch', False):
+        logger.info("Scheduled fetch and process to run every hour")
+        schedule.every().hour.do(run_periodic_fetch)
+        
+    # Schedule summary check every 15 minutes
+    logger.info("Scheduled summary check to run every 15 minutes")
+    schedule.every(15).minutes.do(generate_and_send_summary)
+    
+    # Run initial fetch and process
+    run_periodic_fetch()
+    
+    # Run initial summary check
+    generate_and_send_summary()
+    
+    logger.info("Starting scheduler")
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+
 if __name__ == "__main__":
-    setup_scheduler() 
+    main() 

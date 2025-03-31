@@ -3,27 +3,35 @@ Database models for LetterMonstr application.
 """
 
 import os
+import json
+import logging
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, ForeignKey, text
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, ForeignKey, text, Float
 from sqlalchemy.orm import relationship, sessionmaker, declarative_base
 import sqlite3
 
 # Using declarative_base from sqlalchemy.orm instead of sqlalchemy.ext.declarative which is deprecated
 Base = declarative_base()
 
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 class ProcessedEmail(Base):
     """Model for tracking processed emails."""
     __tablename__ = 'processed_emails'
     
     id = Column(Integer, primary_key=True)
-    message_id = Column(String(255), unique=True, nullable=False)
-    subject = Column(String(255))
-    sender = Column(String(255))
+    message_id = Column(String, unique=True, index=True)
+    subject = Column(String)
+    sender = Column(String)
     date_received = Column(DateTime)
     date_processed = Column(DateTime, default=datetime.now)
+    is_read = Column(Boolean, default=False)
     
-    # One-to-many relationship with content
+    # One-to-many relationships
     contents = relationship("EmailContent", back_populates="email", cascade="all, delete-orphan")
+    content_items = relationship("ProcessedContent", back_populates="email")
 
 class EmailContent(Base):
     """Model for storing content extracted from emails."""
@@ -31,7 +39,7 @@ class EmailContent(Base):
     
     id = Column(Integer, primary_key=True)
     email_id = Column(Integer, ForeignKey('processed_emails.id'))
-    content_type = Column(String(50))  # e.g., 'text', 'html', 'attachment'
+    content_type = Column(String)  # 'html', 'text', 'raw'
     content = Column(Text)
     
     # Many-to-one relationship with email
@@ -39,6 +47,20 @@ class EmailContent(Base):
     
     # One-to-many relationship with links
     links = relationship("Link", back_populates="content", cascade="all, delete-orphan")
+    
+    def set_content(self, content_data):
+        """Properly serialize content data before storing it"""
+        if isinstance(content_data, dict):
+            self.content = json.dumps(content_data)
+        else:
+            self.content = content_data
+            
+    def get_content(self):
+        """Get content, deserializing if needed"""
+        try:
+            return json.loads(self.content)
+        except (json.JSONDecodeError, TypeError):
+            return self.content
 
 class Link(Base):
     """Model for storing links found in email content."""
@@ -91,23 +113,41 @@ class ProcessedContent(Base):
     __tablename__ = 'processed_content'
     
     id = Column(Integer, primary_key=True)
-    content_hash = Column(String(64), index=True, unique=True)  # For deduplication
-    email_id = Column(Integer, ForeignKey('processed_emails.id'), nullable=True)
-    source = Column(String(255))  # Where the content came from (email subject, URL, etc.)
-    content_type = Column(String(50))  # 'email', 'crawled', 'combined', etc.
-    raw_content = Column(Text)  # Original content
-    processed_content = Column(Text)  # Processed and cleaned content
-    content_metadata = Column(Text)  # Store additional metadata as JSON
+    email_id = Column(Integer, ForeignKey('processed_emails.id'))
+    content_type = Column(String)  # 'article', 'newsletter', etc.
+    source = Column(String)
+    title = Column(String)
+    url = Column(String)
+    processed_content = Column(Text)
+    summary = Column(Text)
     date_processed = Column(DateTime, default=datetime.now)
-    summarized = Column(Boolean, default=False)  # Whether it's been included in a summary
+    is_summarized = Column(Boolean, default=False)
+    content_hash = Column(String)  # For deduplication
+    email = relationship("ProcessedEmail", back_populates="content_items")
     summary_id = Column(Integer, ForeignKey('summaries.id'), nullable=True)  # Which summary included this content
     
     # Relationships
-    email = relationship("ProcessedEmail", foreign_keys=[email_id])
     summary = relationship("Summary", foreign_keys=[summary_id])
     
     def __repr__(self):
-        return f"<ProcessedContent(id={self.id}, source='{self.source}', summarized={self.summarized})>"
+        return f"<ProcessedContent(id={self.id}, source='{self.source}', is_summarized={self.is_summarized})>"
+
+class SummarizedContent(Base):
+    """Model for tracking content that has been included in summaries to prevent duplicates."""
+    __tablename__ = 'summarized_content_history'
+    
+    id = Column(Integer, primary_key=True)
+    content_hash = Column(String(64), unique=True, nullable=False)
+    content_title = Column(String(255))
+    content_fingerprint = Column(Text)  # Store a representation of the content for matching
+    summary_id = Column(Integer, ForeignKey('summaries.id'))
+    date_summarized = Column(DateTime, default=datetime.now)
+    
+    # Relationship with the summary
+    summary = relationship("Summary", back_populates="content_signatures")
+
+# Add relationship to Summary model
+Summary.content_signatures = relationship("SummarizedContent", back_populates="summary")
 
 def init_db(db_path):
     """Initialize the database."""

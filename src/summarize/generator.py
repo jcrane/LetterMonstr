@@ -10,8 +10,9 @@ import time
 import json
 from datetime import datetime
 from anthropic import Anthropic
+import hashlib
 
-from src.database.models import get_session, Summary
+from src.database.models import get_session, Summary, ProcessedContent
 from src.summarize.claude_summarizer import create_claude_prompt
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,12 @@ class SummaryGenerator:
             summary_text = self._call_claude_api(prompt)
             
             # Store the summary in the database
-            self._store_summary(summary_text, processed_content)
+            summary_id = self._store_summary(summary_text, processed_content)
+            
+            # Store content signatures for future deduplication
+            from src.summarize.processor import ContentProcessor
+            content_processor = ContentProcessor({'ad_keywords': []})
+            content_processor.store_summarized_content(summary_id, processed_content)
             
             return summary_text
             
@@ -241,7 +247,12 @@ Follow these guidelines:
 1. MOST IMPORTANT: Be thorough and comprehensive - include ALL meaningful content, stories, and insights from the source material.
 2. Do not omit any significant articles, stories or topics from the newsletters.
 3. Focus on factual information and key insights.
-4. Remove any redundancy or duplicate information across different sources.
+4. AGGRESSIVELY REMOVE DUPLICATES: Many articles will appear multiple times across different newsletters.
+   - When you see the same story covered in multiple sources, combine them into a SINGLE summary
+   - Identify articles with the same topic or subject matter even if the titles differ
+   - Look for identical or nearly identical content and only include it once
+   - Include all unique details, but don't repeat the same information
+   - Mention if an item was covered by multiple sources, but only summarize it once
 5. Organize information by topic, not by source.
 6. Remove any content that appears to be advertising or sponsored.
 7. Include important details like dates, statistics, and key findings.
@@ -303,74 +314,59 @@ IMPORTANT: Format for proper HTML email display. DO include HTML formatting and 
             return f"Error generating summary: {str(e)}"
     
     def _store_summary(self, summary_text, processed_content):
-        """Store the generated summary in the database."""
+        """Store the summary and mark content as summarized."""
+        if not summary_text or not processed_content:
+            return None
+            
+        # Open database session
+        session = get_session(self.db_path)
         try:
-            # Calculate period start and end dates
-            dates = []
+            # Create summary record
+            summary = Summary(
+                summary_type='daily',
+                summary_text=summary_text,
+                period_start=datetime.now(),
+                period_end=datetime.now(),
+                creation_date=datetime.now(),
+                sent=False
+            )
+            
+            session.add(summary)
+            session.flush()  # Get the ID
+            
+            # Update processed content records to mark them as summarized
+            content_hashes = []
             for item in processed_content:
-                date_value = item.get('date', datetime.now())
-                # Convert string dates to datetime objects
-                if isinstance(date_value, str):
-                    try:
-                        # Try to parse the date string - handle different formats
-                        # First try ISO format
-                        try:
-                            date_value = datetime.fromisoformat(date_value.replace('Z', '+00:00'))
-                        except ValueError:
-                            # If that fails, try a more flexible approach
-                            import dateutil.parser
-                            date_value = dateutil.parser.parse(date_value)
-                        dates.append(date_value)
-                    except Exception as e:
-                        logger.warning(f"Could not parse date string '{date_value}': {e}")
-                        # Use current time as fallback
-                        dates.append(datetime.now())
-                else:
-                    dates.append(date_value)
+                # Create content hash for lookup
+                content = item.get('content', '')
+                title = item.get('source', '')
+                content_hash = hashlib.md5((title + content[:100]).encode('utf-8')).hexdigest()
+                content_hashes.append(content_hash)
             
-            # Use current time if no valid dates found
-            if not dates:
-                period_start = period_end = datetime.now()
-            else:
-                period_start = min(dates)
-                period_end = max(dates)
+            # Update the processed content items
+            session.query(ProcessedContent).filter(
+                ProcessedContent.content_hash.in_(content_hashes)
+            ).update(
+                {
+                    'is_summarized': True,
+                    'summary_id': summary.id
+                },
+                synchronize_session=False
+            )
             
-            # Determine summary type based on timespan
-            days_span = (period_end - period_start).days
-            if days_span <= 1:
-                summary_type = 'daily'
-            elif days_span <= 7:
-                summary_type = 'weekly'
-            else:
-                summary_type = 'monthly'
+            # Commit changes
+            session.commit()
+            logger.info(f"Stored summary {summary.id} and marked {len(content_hashes)} content items as summarized")
             
-            # Create summary entry
-            session = get_session(self.db_path)
+            return summary.id
             
-            try:
-                summary = Summary(
-                    period_start=period_start,
-                    period_end=period_end,
-                    summary_type=summary_type,
-                    summary_text=summary_text,
-                    creation_date=datetime.now(),
-                    sent=False
-                )
-                
-                session.add(summary)
-                session.commit()
-                
-                logger.info(f"Stored {summary_type} summary in database")
-                
-            except Exception as e:
-                session.rollback()
-                logger.error(f"Error storing summary: {e}", exc_info=True)
-            finally:
-                session.close()
-                
         except Exception as e:
-            logger.error(f"Error in _store_summary: {e}", exc_info=True)
-            
+            logger.error(f"Error storing summary: {e}", exc_info=True)
+            session.rollback()
+            return None
+        finally:
+            session.close()
+    
     def combine_summaries(self, summaries):
         """Combine multiple summaries into one comprehensive summary."""
         if not summaries:

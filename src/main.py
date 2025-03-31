@@ -121,11 +121,11 @@ def process_accumulated_content():
         
         try:
             # Get all unsummarized content
-            unsummarized = session.query(ProcessedContent).filter_by(summarized=False).all()
+            unsummarized = session.query(ProcessedContent).filter_by(is_summarized=False).all()
             
             if not unsummarized:
                 logger.info("No unsummarized content found")
-                return
+                return False
             
             logger.info(f"Found {len(unsummarized)} unsummarized content items")
             
@@ -175,7 +175,7 @@ def process_accumulated_content():
             
             if not combined_summary:
                 logger.error("Failed to generate summary")
-                return
+                return False
             
             # Send the combined summary if it's time
             if should_send_summary():
@@ -190,9 +190,8 @@ def process_accumulated_content():
                 
                 # Mark all processed content as summarized
                 for item in unsummarized:
-                    item.summarized = True
+                    item.is_summarized = True
                 
-                # Commit the changes
                 session.commit()
                 logger.info(f"Marked {len(unsummarized)} content items as summarized")
             else:

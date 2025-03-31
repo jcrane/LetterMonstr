@@ -12,13 +12,14 @@ import shutil
 import logging
 from datetime import datetime
 
-# Add the project root to Python path
+# Fix path to properly add the project root
 current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, current_dir)
+project_root = os.path.dirname(os.path.dirname(current_dir))  # Go up two levels to the project root
+sys.path.insert(0, project_root)
 
 # Import database models
 from src.database.models import init_db, Base
-from src.fetch_process import load_config
+# We don't need load_config since we're directly specifying the database path
 
 # Set up logging
 logging.basicConfig(
@@ -32,13 +33,12 @@ logger = logging.getLogger(__name__)
 
 def reset_database():
     """Reset the database and related files."""
-    # Get database path
-    config = load_config()
-    db_path = os.path.join(current_dir, 'data', 'lettermonstr.db')
-    status_file = os.path.join(current_dir, 'data', 'fetch_status.json')
+    # Define database path and status file path
+    db_path = os.path.join(project_root, 'data', 'lettermonstr.db')
+    status_file = os.path.join(project_root, 'data', 'fetch_status.json')
     
     # Ensure data directory exists
-    os.makedirs(os.path.join(current_dir, 'data'), exist_ok=True)
+    os.makedirs(os.path.join(project_root, 'data'), exist_ok=True)
     
     # Ask for confirmation
     print("\n⚠️ WARNING: This will delete all data in the LetterMonstr database! ⚠️")
