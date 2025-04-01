@@ -12,7 +12,7 @@ import time
 import yaml
 import logging
 import schedule
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 
 # Add the project root to the Python path for imports
@@ -56,91 +56,54 @@ def load_config():
         logger.error(f"Failed to load configuration: {e}")
         sys.exit(1)
 
-def should_send_summary(config, force=False):
-    """Determine if it's time to send a summary based on configuration."""
-    # If force is True, bypass all time checks
-    if force:
-        logger.info("Force flag is set, bypassing time checks")
-        return True
-        
-    current_time = datetime.now()
-    frequency = config['summary']['frequency']
-    delivery_time_str = config['summary']['delivery_time']
-    
-    # Parse delivery time
-    delivery_hour, delivery_minute = map(int, delivery_time_str.split(':'))
-    
-    # Get system time from multiple sources for debugging
-    system_time = time.localtime()
-    # Format delivery time with leading zero for minutes
-    formatted_delivery_time = f"{delivery_hour:02d}:{delivery_minute:02d}"
-    logger.info(f"Current time: {current_time}, System time: {time.strftime('%Y-%m-%d %H:%M:%S', system_time)}, Delivery time: {formatted_delivery_time}")
-    
-    # Create today's delivery time for comparison
-    todays_delivery_time = datetime(
-        current_time.year, 
-        current_time.month, 
-        current_time.day, 
-        delivery_hour, 
-        delivery_minute
-    )
-    
-    # Check if we're past today's delivery time but before midnight
-    time_check = current_time >= todays_delivery_time and \
-                 current_time.date() == todays_delivery_time.date()
-    
-    logger.info(f"Time check result: {time_check} (comparing {current_time} with today's delivery time {todays_delivery_time})")
-    
-    # Check if it's the right day based on frequency
-    day_check = False
-    if frequency == 'daily':
-        day_check = True
-    elif frequency == 'weekly':
-        delivery_day = config['summary']['weekly_day']
-        day_check = current_time.weekday() == delivery_day
-    elif frequency == 'monthly':
-        delivery_day = config['summary']['monthly_day']
-        day_check = current_time.day == delivery_day
-    
-    logger.info(f"Day check result for {frequency} frequency: {day_check}")
-    
-    # If it's not the right time or day, don't send a summary
-    if not (time_check and day_check):
-        logger.info(f"Not sending summary. time_check: {time_check}, day_check: {day_check}")
-        return False
-    
-    # Check if we've already sent a summary today (regardless of whether it was forced or not)
-    db_path = os.path.join(project_root, 'data', 'lettermonstr.db')
-    session = get_session(db_path)
+def should_send_summary():
+    """Check if we should send a summary based on the configured schedule."""
     try:
-        # Create date bounds for today
-        today_start = datetime(current_time.year, current_time.month, current_time.day, 0, 0, 0)
-        today_end = datetime(current_time.year, current_time.month, current_time.day, 23, 59, 59)
+        # Get current time in UTC
+        now = datetime.now(timezone.utc)
         
-        logger.info(f"Checking for summaries between {today_start} and {today_end}, only non-forced summaries")
+        # Get configured delivery time
+        delivery_time = config.get('summary_delivery_time', '20:15')
+        hour, minute = map(int, delivery_time.split(':'))
         
-        # Check if there's any summary sent today at the scheduled time
-        recent_summaries = session.query(Summary).filter(
-            Summary.sent == True,
-            Summary.sent_date >= today_start,
-            Summary.sent_date <= today_end,
-            Summary.is_forced == False  # Only look at scheduled summaries, not forced ones
-        ).order_by(Summary.creation_date.desc()).first()
+        # Create target time for today
+        target_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         
-        already_sent_today = recent_summaries is not None
-        
-        if already_sent_today:
-            logger.info(f"Found a non-forced summary sent today: ID {recent_summaries.id}, sent at {recent_summaries.sent_date}")
-        else:
-            logger.info("No non-forced summaries found sent today")
-        
-        logger.info(f"Already sent scheduled summary today: {already_sent_today}")
-        return not already_sent_today  # Send if we haven't already sent a scheduled summary today
+        # If current time is before target time, don't send
+        if now < target_time:
+            return False
+            
+        # If current time is more than 2 minutes after target time, don't send
+        if (now - target_time).total_seconds() > 120:  # 2 minutes
+            return False
+            
+        # Check if we have any unsummarized content
+        with Session() as session:
+            unsummarized_count = session.query(ProcessedContent).filter(
+                ProcessedContent.is_summarized == False
+            ).count()
+            
+            if unsummarized_count == 0:
+                logger.info("No unsummarized content to send")
+                return False
+                
+            # Check if we've already sent a summary today
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            recent_summary = session.query(Summary).filter(
+                Summary.created_at >= today_start,
+                Summary.sent == True
+            ).first()
+            
+            if recent_summary:
+                logger.info("Already sent a summary today")
+                return False
+                
+            logger.info(f"Found {unsummarized_count} unsummarized items to include in summary")
+            return True
+            
     except Exception as e:
-        logger.error(f"Error checking for existing summaries: {e}", exc_info=True)
-        return False  # If there's an error, be cautious and don't send
-    finally:
-        session.close()
+        logger.error(f"Error checking summary schedule: {str(e)}")
+        return False
 
 def has_content_to_summarize():
     """Check if there is content to summarize, either unsummarized or total content."""
@@ -190,7 +153,7 @@ def generate_and_send_summary(force=False):
     config = load_config()
     
     # Check if it's time to send a summary
-    if not should_send_summary(config, force):
+    if not should_send_summary():
         logger.info("Not time to send summary yet")
         return
     
@@ -636,36 +599,51 @@ def setup_scheduler():
             last_check_time = time.time()
 
 def main():
-    """Main entry point for the periodic runner."""
-    # Load configuration
-    config = load_config()
-    
-    # Check if force flag is passed
-    force = len(sys.argv) > 1 and sys.argv[1] == '--force'
-    
-    if force:
-        logger.info("Force flag detected, generating summary immediately")
-        generate_and_send_summary(force=True)
+    """Main function to run the periodic fetcher."""
+    try:
+        # Initialize database
+        init_db()
         
-    # Set up periodic tasks
-    if config['email'].get('periodic_fetch', False):
-        logger.info("Scheduled fetch and process to run every hour")
-        schedule.every().hour.do(run_periodic_fetch)
+        # Set up logging
+        setup_logging()
         
-    # Schedule summary check every 15 minutes
-    logger.info("Scheduled summary check to run every 15 minutes")
-    schedule.every(15).minutes.do(generate_and_send_summary)
-    
-    # Run initial fetch and process
-    run_periodic_fetch()
-    
-    # Run initial summary check
-    generate_and_send_summary()
-    
-    logger.info("Starting scheduler")
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
+        logger.info("Starting LetterMonstr Periodic Fetcher")
+        
+        # Get configuration
+        config = load_config()
+        
+        # Check if periodic fetching is enabled
+        if not config.get('periodic_fetching', False):
+            logger.error("Periodic fetching is not enabled in config.yaml")
+            sys.exit(1)
+            
+        # Get fetch interval from config
+        fetch_interval = config.get('fetch_interval', 15)  # Default to 15 minutes
+        
+        # Get summary delivery time from config
+        delivery_time = config.get('summary_delivery_time', '20:15')
+        
+        logger.info(f"Periodic fetching enabled. Fetch interval: {fetch_interval} minutes")
+        logger.info(f"Summary delivery time: {delivery_time}")
+        
+        # Schedule periodic fetch
+        schedule.every(fetch_interval).minutes.do(fetch_and_process)
+        
+        # Schedule summary generation at configured time
+        schedule.every().day.at(delivery_time).do(generate_and_send_summary)
+        
+        # Run the scheduler
+        while True:
+            try:
+                schedule.run_pending()
+                time.sleep(1)
+            except Exception as e:
+                logger.error(f"Error in scheduler loop: {str(e)}")
+                time.sleep(60)  # Wait a minute before retrying
+                
+    except Exception as e:
+        logger.error(f"Fatal error in main: {str(e)}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main() 
