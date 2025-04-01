@@ -3,12 +3,12 @@ imaplib2>=2.45.0
 email-validator==2.0.0
 
 # Web and content processing
-requests==2.32.0
+requests>=2.32.1
 beautifulsoup4==4.12.2
 lxml>=4.6.0
 
 # Natural language processing
-nltk==3.9
+nltk>=3.9.1
 python-dateutil==2.8.2
 
 # Database
@@ -28,4 +28,4 @@ anthropic>=0.47.0
 
 # Utilities
 python-dotenv==1.0.0
-tqdm==4.66.3 
+tqdm>=4.66.4 
