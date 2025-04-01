@@ -150,12 +150,14 @@ def has_content_to_summarize():
         # Get unsummarized content
         unsummarized_count = session.query(ProcessedContent).filter_by(is_summarized=False).count()
         
+        # Get total content count right away
+        total_content = session.query(ProcessedContent).count()
+        
         # If we have unsummarized content, we can generate a summary
         if unsummarized_count > 0:
             return True, unsummarized_count, total_content
         
         # If no unsummarized content, check if we have any content at all
-        total_content = session.query(ProcessedContent).count()
         processed_emails = session.query(ProcessedEmail).count()
         
         # If we have processed emails and content, we should still generate a summary

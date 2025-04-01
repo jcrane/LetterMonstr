@@ -37,12 +37,33 @@ class WebCrawler:
         }
     
     def crawl(self, links, depth=0):
-        """Crawl the provided links and extract content."""
-        if not links or depth >= self.max_depth:
+        """Crawl the provided links and extract content.
+        
+        Args:
+            links: Either a single URL string, a dictionary with URL, or a list of link dictionaries
+            depth: Current depth of crawling (for recursive crawling)
+        
+        Returns:
+            list: List of crawled content dictionaries
+        """
+        if not links:
             return []
+            
+        # Stop if we've reached maximum depth
+        if depth >= self.max_depth:
+            logger.info(f"Reached maximum crawl depth ({self.max_depth}), stopping")
+            return []
+        
+        # Convert single string URL to a link dictionary
+        if isinstance(links, str):
+            links = [{'url': links, 'title': links}]
+        # Convert single link dictionary to a list
+        elif isinstance(links, dict) and 'url' in links:
+            links = [links]
         
         # Limit the number of links to crawl
         if len(links) > self.max_links:
+            logger.info(f"Limiting crawl to {self.max_links} of {len(links)} links")
             links = links[:self.max_links]
         
         crawled_content = []
@@ -50,7 +71,17 @@ class WebCrawler:
         
         try:
             for link_data in links:
+                # Skip if we don't have a URL
+                if not isinstance(link_data, dict) or 'url' not in link_data:
+                    logger.warning(f"Invalid link data, skipping: {link_data}")
+                    continue
+                    
                 url = link_data['url']
+                
+                # Skip if not a valid HTTP URL
+                if not url.lower().startswith(('http://', 'https://')):
+                    logger.warning(f"Skipping non-HTTP URL: {url}")
+                    continue
                 
                 # Skip already crawled links
                 if self._is_crawled(session, url):
@@ -58,27 +89,38 @@ class WebCrawler:
                     continue
                 
                 # Fetch and process the page
+                logger.info(f"Crawling URL: {url}")
                 page_content = self._fetch_page(url)
                 
                 if not page_content:
+                    logger.warning(f"No content fetched from URL: {url}")
                     continue
                 
                 # Extract content from the page
                 extracted_content = self._extract_content(url, page_content)
                 
+                # Skip if we didn't extract meaningful content
+                if not extracted_content or not extracted_content.get('clean_text'):
+                    logger.warning(f"No meaningful content extracted from URL: {url}")
+                    continue
+                
                 # Check if content appears to be an advertisement
                 is_ad = self._is_advertisement(extracted_content)
+                if is_ad:
+                    logger.info(f"Content from {url} appears to be an advertisement, skipping")
+                    continue
                 
                 # Store the crawled content
                 content_id = self._store_content(session, url, extracted_content, is_ad)
                 
-                if not is_ad:
-                    crawled_content.append({
-                        'url': url,
-                        'title': extracted_content['title'],
-                        'content': extracted_content['clean_text'],
-                        'is_ad': is_ad
-                    })
+                # Add to results
+                crawled_content.append({
+                    'url': url,
+                    'title': extracted_content['title'],
+                    'content': extracted_content['clean_text'],
+                    'is_ad': is_ad,
+                    'content_id': content_id
+                })
                 
                 # Add a small delay to be nice to servers
                 time.sleep(1)

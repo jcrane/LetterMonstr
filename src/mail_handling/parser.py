@@ -27,165 +27,197 @@ class EmailParser:
                                 'data', 'lettermonstr.db')
     
     def parse(self, email_data):
-        """Parse the email content and extract meaningful information"""
-        try:
-            logger.info(f"Parsing email: {email_data.get('subject', '')}")
+        """Parse email content and extract links.
+        
+        This method parses email content, detects forwarded emails,
+        extracts the content and links, and returns a structured result.
+        
+        Args:
+            email_data (dict): Email data from the fetcher.
             
-            # Store raw values
-            raw_html = email_data.get('html_content', '')
-            raw_text = email_data.get('text_content', '')
+        Returns:
+            dict: Parsed content with extracted links.
+        """
+        session = get_session(self.db_path)
+        
+        try:
+            if not email_data:
+                logger.warning("Empty email data provided to parser")
+                return None
+                
+            # Ensure we have a title/subject
+            if 'subject' not in email_data or not email_data['subject']:
+                email_data['subject'] = "No Subject"
+                
             subject = email_data.get('subject', '')
             
-            # Special handling for problematic emails with emoji
-            if 'AI Risk Curve' in subject or 'CoreWeave IPO' in subject or '🤖' in subject or '💹' in subject:
-                logger.info(f"Special handling for emoji email: {subject}")
-                
-                # First, check if we have the original_full_message
-                if 'original_full_message' in email_data:
-                    full_message = email_data['original_full_message']
-                    
-                    # Try to extract content directly
-                    lines = full_message.splitlines()
-                    content_start = False
-                    content_lines = []
-                    
-                    for line in lines:
-                        # Look for blank line after headers which typically marks the start of content
-                        if not content_start and line.strip() == '':
-                            content_start = True
-                            continue
-                        
-                        if content_start:
-                            # Skip common email separators/signatures
-                            if '--' in line and len(line.strip()) < 10:
-                                continue
-                            content_lines.append(line)
-                    
-                    if content_lines:
-                        extracted_content = '\n'.join(content_lines)
-                        if len(extracted_content) > 100:  # Only use if substantial
-                            logger.info(f"Extracted content directly from message, length: {len(extracted_content)}")
-                            email_data['main_content'] = extracted_content
-                            email_data['content_source'] = 'original_message_direct'
-                            return email_data
+            # Initialize content fields
+            email_data['content'] = None
+            email_data['html_content'] = None
+            email_data['text_content'] = None
             
-            # Check if email appears to be a forwarded message
+            # Check if this is a forwarded email
             is_forwarded = False
-            forwarded_markers = [
-                "fwd:", "fw:", "forwarded", 
-                "---------- forwarded message ---------", 
-                "begin forwarded message"
-            ]
+            forwarded_markers = ['Fwd:', 'FW:', 'Forwarded:']
             
-            # Check subject for forwarding markers
-            if any(marker in subject.lower() for marker in forwarded_markers):
+            if any(marker in subject for marker in forwarded_markers):
                 is_forwarded = True
-                logger.info(f"Detected forwarded email from subject: {subject}")
+                logger.info(f"Detected forwarded email: {subject}")
+                email_data['is_forwarded'] = True
             
-            # Check content for forwarding markers if we have content
-            if not is_forwarded and raw_html:
-                lower_html = raw_html.lower()
-                if any(marker in lower_html for marker in forwarded_markers) or "gmail_quote" in lower_html:
-                    is_forwarded = True
-                    logger.info(f"Detected forwarded email from content markers")
-            
-            # If this is a forwarded email with emoji, try another approach
-            if is_forwarded and ('🤖' in subject or '💹' in subject or 'AI Risk Curve' in subject):
-                logger.info(f"Using specialized approach for forwarded emoji email: {subject}")
+            # For forwarded emails, prioritize raw_email content
+            if is_forwarded:
+                content = email_data.get('content', {})
                 
-                # Try to use the raw text content directly if available
-                if raw_text and len(raw_text) > 100:
-                    # Remove common email headers from forwarded messages
-                    import re
-                    cleaned_text = raw_text
+                # First check if we have raw_email directly in the content
+                raw_email = None
+                
+                if isinstance(content, dict) and 'raw_email' in content:
+                    raw_email = content['raw_email']
+                    logger.info(f"Found raw_email in content dictionary: {len(raw_email)} chars")
+                elif isinstance(content, dict) and 'raw_message' in content:
+                    raw_email = content['raw_message']
+                    logger.info(f"Found raw_message in content dictionary: {len(raw_email)} chars")
+                elif 'raw_email' in email_data:
+                    raw_email = email_data['raw_email']
+                    logger.info(f"Found raw_email in email_data: {len(raw_email)} chars")
+                elif 'raw_message' in email_data:
+                    raw_email = email_data['raw_message']
+                    logger.info(f"Found raw_message in email_data: {len(raw_email)} chars")
+                
+                # If we found raw email content, process it directly
+                if raw_email and len(raw_email) > 500:
+                    # Extract content from raw email
+                    extracted_content = self._extract_forwarded_content(raw_email)
                     
-                    # Remove forwarded headers pattern
-                    header_pattern = r"(-{5,}|={5,})\s*(Forwarded|Original).*?(-{5,}|={5,})"
-                    cleaned_text = re.sub(header_pattern, "", cleaned_text, flags=re.DOTALL | re.IGNORECASE)
-                    
-                    # Remove email headers
-                    header_lines = [
-                        r"From:.*?[\r\n]",
-                        r"Sent:.*?[\r\n]", 
-                        r"To:.*?[\r\n]",
-                        r"Subject:.*?[\r\n]",
-                        r"Date:.*?[\r\n]"
-                    ]
-                    
-                    for pattern in header_lines:
-                        cleaned_text = re.sub(pattern, "", cleaned_text, flags=re.IGNORECASE)
-                    
-                    # If we have substantial content after cleaning
-                    if len(cleaned_text) > 100:
-                        logger.info(f"Using directly cleaned text content, length: {len(cleaned_text)}")
-                        email_data['main_content'] = cleaned_text
-                        email_data['content_source'] = 'cleaned_text_direct'
+                    if extracted_content and len(extracted_content) > 200:
+                        logger.info(f"Successfully extracted {len(extracted_content)} chars from raw forwarded email")
+                        email_data['content'] = extracted_content
+                        content_type = 'html' if '<html' in extracted_content.lower() else 'text'
+                        email_data['content_type'] = content_type
+                        email_data['links'] = self.extract_links(extracted_content, content_type)
                         return email_data
             
-            # If HTML content exists, use it as primary source
-            if raw_html:
-                # Clean and extract content from HTML
-                cleaned_html = self._clean_html(raw_html, is_forwarded, subject)
-                main_content = self._extract_text_from_html(cleaned_html)
-                content_source = 'html'
-            else:
-                # If no HTML, use text content
-                main_content = raw_text
-                content_source = 'text'
+            # If we couldn't process raw email or this isn't a forwarded email, continue with normal parsing
             
-            # If content is too short (or empty) or we know it's forwarded, try deeper search
-            if (not main_content or len(main_content) < 100) or is_forwarded:
-                alternative_content, better_source = self._deep_search_content(email_data, is_forwarded)
-                
-                # Only use alternative if it's substantially better
-                if alternative_content and len(alternative_content) > max(len(main_content) if main_content else 0, 50):
-                    main_content = alternative_content
-                    content_source = better_source
-                    logger.info(f"Using better content from '{better_source}', new length: {len(main_content)}")
+            # Extract the message body
+            message_body = None
+            content = email_data.get('content', {})
             
-            # Last resort: If still no good content and we have original_full_message, try direct extraction
-            if (not main_content or len(main_content) < 50) and 'original_full_message' in email_data:
-                logger.info("Trying direct extraction from original_full_message as last resort")
-                orig_message = email_data['original_full_message']
+            # Try to get content from multiple sources
+            if 'html' in email_data and email_data['html']:
+                html_content = email_data['html']
                 
-                # Try a different approach to extract content
-                import re
+                # Clean the HTML
+                cleaned_html = self._clean_html(html_content, is_forwarded=is_forwarded, subject=subject)
                 
-                # Remove all email headers
-                headers_end = re.search(r'\r?\n\r?\n', orig_message)
-                if headers_end:
-                    content_part = orig_message[headers_end.end():]
+                if cleaned_html:
+                    message_body = cleaned_html
+                    email_data['html_content'] = cleaned_html
+            
+            # If we don't have HTML or cleaned HTML is empty, try text
+            if not message_body and 'text' in email_data and email_data['text']:
+                text_content = email_data['text']
+                
+                # Clean the text
+                cleaned_text = self._clean_text(text_content)
+                
+                if cleaned_text:
+                    message_body = cleaned_text
+                    email_data['text_content'] = cleaned_text
+            
+            # If we have original_full_message and the content is short, try to extract from there
+            if (not message_body or (message_body and len(message_body) < 200)) and 'original_full_message' in email_data:
+                logger.info("Using original_full_message as content source")
+                full_message = email_data['original_full_message']
+                
+                # Extract content from the full message
+                extracted_content = self._extract_content_from_full_message(full_message, is_forwarded)
+                
+                if extracted_content and (not message_body or len(extracted_content) > len(message_body)):
+                    message_body = extracted_content
+                    logger.info(f"Extracted better content from original_full_message, length: {len(message_body)}")
+            
+            # If we still don't have content, check raw_content
+            if (not message_body or (message_body and len(message_body) < 200)) and 'raw_content' in email_data:
+                logger.info("Using raw_content as content source")
+                raw_content = email_data['raw_content']
+                
+                # Extract content from raw content
+                extracted_content = self._extract_content_from_raw(raw_content, is_forwarded)
+                
+                if extracted_content and (not message_body or len(extracted_content) > len(message_body)):
+                    message_body = extracted_content
+                    logger.info(f"Extracted better content from raw_content, length: {len(message_body)}")
                     
-                    # Remove any quoted reply/forwarded markers
-                    content_part = re.sub(r'On.*?wrote:', '', content_part, flags=re.DOTALL)
-                    content_part = re.sub(r'--+.*?--+', '', content_part, flags=re.DOTALL)
-                    
-                    if len(content_part) > 100:
-                        main_content = content_part
-                        content_source = 'original_message_direct_extract'
-                        logger.info(f"Extracted content directly from original message, length: {len(main_content)}")
-            
-            # Set the main content in the email data
-            email_data['main_content'] = main_content
-            email_data['content_source'] = content_source
-            
-            # Last fallback: if content is still too short, take everything we have
-            if not main_content or len(main_content) < 50:
-                logger.warning(f"Very short content for source: {subject}, length: {len(main_content) if main_content else 0}")
+            # Special handling for forwarded emails
+            if is_forwarded:
+                logger.info("Applying special forwarded email handling")
                 
-                # Use the full message as a last resort
-                if 'original_full_message' in email_data:
-                    email_data['main_content'] = email_data['original_full_message']
-                    email_data['content_source'] = 'full_message_fallback'
-                    logger.info(f"Using full message as fallback, length: {len(email_data['original_full_message'])}")
+                # Try to get raw message if available
+                if 'raw_message' in email_data:
+                    logger.info("Extracting content from raw_message for forwarded email")
+                    forwarded_content = self._extract_forwarded_content(email_data['raw_message'])
+                    
+                    if forwarded_content and len(forwarded_content) > 200:
+                        message_body = forwarded_content
+                        logger.info(f"Extracted content from raw_message for forwarded email, length: {len(message_body)}")
+                
+                # Check for forwarded_html in content dictionary
+                if isinstance(content, dict) and 'forwarded_html' in content:
+                    forwarded_html = content['forwarded_html']
+                    if forwarded_html and len(forwarded_html) > 200:
+                        message_body = forwarded_html
+                        logger.info(f"Using forwarded_html from content dictionary, length: {len(message_body)}")
+                
+                # If we still don't have good content for forwarded email, try deep search
+                if not message_body or len(message_body) < 200:
+                    logger.info("Attempting deep search for forwarded email content")
+                    deep_search_content = self._deep_search_content(email_data, is_forwarded=True)
+                    
+                    if deep_search_content and (not message_body or len(deep_search_content) > len(message_body)):
+                        message_body = deep_search_content
+                        logger.info(f"Found better content through deep search, length: {len(message_body)}")
+            
+            # Final check for content length
+            if not message_body or len(message_body) < 50:
+                logger.warning(f"No substantial content found in email: {subject}")
+                
+                # Create a minimal content if nothing was found
+                message_body = f"Email '{subject}' with no extractable content."
+            
+            # Extract links from content
+            links = []
+            if message_body and len(message_body) > 50:
+                # Determine content type (HTML or text)
+                content_type = 'html' if '<html' in message_body.lower() or '<div' in message_body.lower() else 'text'
+                links = self.extract_links(message_body, content_type)
+                logger.info(f"Extracted {len(links)} links from email content")
+            
+            # Store the final content
+            email_data['content'] = message_body
+            email_data['content_type'] = 'html' if '<html' in message_body.lower() or '<div' in message_body.lower() else 'text'
+            email_data['links'] = links
+            
+            # Also check content in email_content field if it's a dictionary
+            if isinstance(content, dict) and 'content' in content and content['content'] and len(content['content']) > len(message_body):
+                logger.info("Using content from email_content field")
+                message_body = content['content']
+                content_type = content.get('content_type', 'text')
+                email_data['content'] = message_body
+                email_data['content_type'] = content_type
+                # Re-extract links with the new content
+                links = self.extract_links(message_body, content_type)
+                email_data['links'] = links
             
             return email_data
+        
         except Exception as e:
-            logger.exception(f"Error parsing email: {e}")
-            # Still return what we have even if processing failed
-            if 'main_content' not in email_data:
-                email_data['main_content'] = email_data.get('text_content', '')
-            return email_data
+            logger.error(f"Error parsing email: {e}", exc_info=True)
+            return None
+        finally:
+            if session:
+                session.close()
     
     def _clean_html(self, html_content, is_forwarded=False, subject=''):
         """Clean and process HTML content"""
@@ -267,90 +299,162 @@ class EmailParser:
             logger.exception(f"Error cleaning HTML: {e}")
             return html_content  # Return original if cleaning fails
     
-    def _deep_search_content(self, email_data, is_forwarded=False):
-        """Search more deeply for content in complex email structures"""
-        raw_html = email_data.get('html_content', '')
-        raw_text = email_data.get('text_content', '')
-        best_content = ""
-        content_source = ""
+    def _deep_search_content(self, email_data, is_forwarded=False, depth=0, max_depth=5):
+        """Deep search for content in the email data structure.
         
-        # Special handling for emails with forwarded markers in the subject
-        subject = email_data.get('subject', '')
-        if is_forwarded or ('fwd:' in subject.lower()) or ('🤖' in subject):
-            logger.info(f"Deep search for forwarded email or special email: {subject}")
+        This method recursively searches through the email data structure
+        to find the most substantial content.
+        
+        Args:
+            email_data (dict): The email data to search
+            is_forwarded (bool): Whether this is a forwarded email
+            depth (int): Current recursion depth
+            max_depth (int): Maximum recursion depth
             
-            # Try to extract content from original full message
-            if 'original_full_message' in email_data:
-                orig_message = email_data['original_full_message']
+        Returns:
+            str: The best content found in the email data
+        """
+        if depth > max_depth or not email_data:
+            return ""
+            
+        # Track the best content found so far
+        best_content = ""
+        
+        # Check all the common content fields for forwarded emails
+        if is_forwarded:
+            # Check forward-specific fields
+            if 'raw_message' in email_data and isinstance(email_data['raw_message'], (str, bytes)):
+                content = self._extract_forwarded_content(email_data['raw_message'])
+                if content and len(content) > len(best_content):
+                    logger.info(f"Found better content in raw_message field: {len(content)} chars")
+                    best_content = content
+            
+            # Check for original message in different fields
+            for field in ['original_message', 'original_content', 'forward_content', 'message']:
+                if field in email_data and isinstance(email_data[field], (str, bytes)):
+                    content = self._extract_forwarded_content(email_data[field])
+                    if content and len(content) > len(best_content):
+                        logger.info(f"Found better content in {field} field: {len(content)} chars")
+                        best_content = content
+        
+        # Process content field if it's a dictionary
+        content_dict = email_data.get('content', {})
+        if isinstance(content_dict, dict):
+            # Check HTML content
+            if 'html' in content_dict and content_dict['html']:
+                html_content = content_dict['html']
                 
-                # Search for forwarded content in the original message
-                forwarded_sections = []
+                # Process HTML content based on whether it's a forwarded email
+                cleaned_html = self._clean_html(html_content, is_forwarded=is_forwarded)
+                if cleaned_html and len(cleaned_html) > len(best_content):
+                    logger.info(f"Found better content in content.html field: {len(cleaned_html)} chars")
+                    best_content = cleaned_html
+            
+            # Check text content
+            if 'text' in content_dict and content_dict['text']:
+                text_content = content_dict['text']
                 
-                # Look for common forwarded email markers
-                markers = [
-                    "---------- Forwarded message ---------",
-                    "Begin forwarded message:",
-                    "From:",
-                    "Date:",
-                    "Subject:",
-                    "To:"
-                ]
+                # Clean the text content
+                cleaned_text = self._clean_text(text_content)
+                if cleaned_text and len(cleaned_text) > len(best_content):
+                    logger.info(f"Found better content in content.text field: {len(cleaned_text)} chars")
+                    best_content = cleaned_text
+            
+            # Recursively search in the content dictionary
+            deep_content = self._deep_search_content_recursive(content_dict, depth + 1, max_depth)
+            if deep_content and len(deep_content) > len(best_content):
+                logger.info(f"Found better content through recursive search in content dictionary: {len(deep_content)} chars")
+                best_content = deep_content
+        
+        # Check direct content fields
+        elif 'content' in email_data and isinstance(email_data['content'], str):
+            content = email_data['content']
+            if content and len(content) > len(best_content):
+                logger.info(f"Found content in direct content field: {len(content)} chars")
+                best_content = content
+        
+        # Check HTML and text fields
+        for field in ['html', 'text', 'body', 'html_content', 'text_content']:
+            if field in email_data and isinstance(email_data[field], str):
+                content = email_data[field]
                 
-                # Find the position of all these markers
-                marker_positions = {}
-                for marker in markers:
-                    if marker in orig_message:
-                        marker_positions[marker] = orig_message.find(marker)
+                # Process content based on type
+                if 'html' in field:
+                    content = self._clean_html(content, is_forwarded=is_forwarded)
+                else:
+                    content = self._clean_text(content)
                 
-                if marker_positions:
-                    # Find the first marker that appears
-                    first_marker = min(marker_positions.items(), key=lambda x: x[1])[0]
-                    start_pos = marker_positions[first_marker]
+                if content and len(content) > len(best_content):
+                    logger.info(f"Found better content in {field} field: {len(content)} chars")
+                    best_content = content
+        
+        # Try recursive search on all dictionary fields
+        for key, value in email_data.items():
+            # Skip already processed fields
+            if key in ['content', 'html', 'text', 'raw_message', 'original_message']:
+                continue
+                
+            if isinstance(value, dict):
+                deep_content = self._deep_search_content_recursive(value, depth + 1, max_depth)
+                if deep_content and len(deep_content) > len(best_content):
+                    logger.info(f"Found better content through recursive search in {key}: {len(deep_content)} chars")
+                    best_content = deep_content
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, (dict, list)):
+                        deep_content = self._deep_search_content_recursive(item, depth + 1, max_depth)
+                        if deep_content and len(deep_content) > len(best_content):
+                            logger.info(f"Found better content through recursive search in {key} list item: {len(deep_content)} chars")
+                            best_content = deep_content
+        
+        # If we found substantial content, return it
+        if best_content and len(best_content) > 200:
+            return best_content
+            
+        # If the content is very short, add an informative message
+        if not best_content or len(best_content) < 50:
+            subject = email_data.get('subject', 'Unknown Subject')
+            return f"No substantial content found in forwarded email: {subject}"
+            
+        return best_content
+    
+    def _deep_search_content_recursive(self, data, depth=0, max_depth=5):
+        """Recursively search through nested structures for meaningful content."""
+        # Guard against excessive recursion
+        if depth > max_depth:
+            return ""
+        
+        # Handle different data types
+        if isinstance(data, dict):
+            # Look for likely content fields in dictionaries
+            for key in ['content', 'body', 'message', 'text', 'html']:
+                if key in data:
+                    value = data[key]
+                    if isinstance(value, str) and len(value) > 100:
+                        return value  # Found substantial content
+                    content = self._deep_search_content_recursive(value, depth + 1, max_depth)
+                    if content:
+                        return content
+            
+            # If no specific key found, search all dictionary values
+            for value in data.values():
+                content = self._deep_search_content_recursive(value, depth + 1, max_depth)
+                if content:
+                    return content
                     
-                    # Find the actual content after headers
-                    header_end = orig_message.find("\n\n", start_pos)
-                    if header_end > 0:
-                        content = orig_message[header_end+2:]
-                        forwarded_sections.append(content)
-                
-                # If we found forwarded sections, use the longest one
-                if forwarded_sections:
-                    best_content = max(forwarded_sections, key=len)
-                    content_source = 'original_message_forwarded'
-                    logger.info(f"Found content in original message forwarded section: {len(best_content)} chars")
-        
-        # If we still don't have good content, try parsing HTML more aggressively
-        if not best_content and raw_html:
-            try:
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(raw_html, 'html.parser')
-                
-                # Try different content extraction strategies
-                
-                # 1. Look for main content divs
-                content_candidates = []
-                for div in soup.find_all('div', class_=lambda c: c and ('content' in c.lower() or 'body' in c.lower())):
-                    content_candidates.append(div.get_text(strip=True))
-                
-                # 2. Look for large text blocks
-                for p in soup.find_all(['p', 'div']):
-                    text = p.get_text(strip=True)
-                    if len(text) > 100:  # Only consider substantial paragraphs
-                        content_candidates.append(text)
-                
-                if content_candidates:
-                    best_content = max(content_candidates, key=len)
-                    content_source = 'aggressive_html'
-                    logger.info(f"Found content through aggressive HTML parsing: {len(best_content)} chars")
-            except Exception as e:
-                logger.exception(f"Error in aggressive HTML parsing: {e}")
-        
-        # If we found something better, return it
-        if best_content:
-            return best_content, content_source
-        
-        # Otherwise return empty result
-        return "", ""
+        elif isinstance(data, list):
+            # For lists, search each item
+            for item in data:
+                content = self._deep_search_content_recursive(item, depth + 1, max_depth)
+                if content:
+                    return content
+                    
+        elif isinstance(data, str) and len(data) > 100:
+            # If it's a substantial string, it might be content
+            return data
+            
+        # No content found
+        return ""
     
     def _extract_text_from_html(self, html_content):
         """Extract readable text from HTML content"""
@@ -469,7 +573,7 @@ class EmailParser:
         except Exception as e:
             logger.exception(f"Error processing email {message_id}: {e}")
             return {'error': str(e)}
-
+    
     def extract_links(self, content, content_type='html'):
         """Extract links from content."""
         links = []
@@ -800,57 +904,239 @@ class EmailParser:
         logger.error(f"Failed to store email content after {max_retries} attempts")
         return None
     
-    def _deep_search_content(self, data, depth=0, max_depth=5):
-        """Recursively search for the largest text content in a nested structure."""
-        if depth > max_depth:
+    def _extract_forwarded_content(self, raw_message):
+        """Extract content from a forwarded email's raw message."""
+        try:
+            # Check if raw_message is a Message object or a string
+            if hasattr(raw_message, 'as_string'):
+                # It's an email.message.Message object, convert to string
+                raw_message_str = raw_message.as_string()
+            else:
+                # It's already a string
+                raw_message_str = raw_message
+                
+            # Now proceed with string operations
+            is_html = '<html' in raw_message_str.lower() or '<!doctype html' in raw_message_str.lower()
+            
+            # For HTML content, use BeautifulSoup to parse it
+            if is_html:
+                soup = BeautifulSoup(raw_message_str, 'html.parser')
+                body = soup.find('body')
+                
+                if body:
+                    forwarded_content = body.get_text(separator='\n', strip=True)
+                    return forwarded_content
+                return raw_message_str
+            
+            # For plain text content, extract content based on common patterns
+            lines = raw_message_str.split('\n')
+            content_lines = []
+            in_forwarded_section = False
+            
+            for line in lines:
+                if any(marker in line for marker in ['---------- Forwarded message ---------', '-------- Original Message --------']):
+                    in_forwarded_section = True
+                    continue
+                    
+                if in_forwarded_section and not line.startswith('>') and not any(marker in line for marker in ['From:', 'Date:', 'Subject:', 'To:']):
+                    content_lines.append(line)
+            
+            if content_lines:
+                return '\n'.join(content_lines)
+            
+            # If all else fails, just return the raw message with minimal cleaning
+            return raw_message_str
+            
+        except Exception as e:
+            self.logger.error(f"Error extracting forwarded content: {e}", exc_info=True)
+            if hasattr(raw_message, 'as_string'):
+                # Return a simplified version if it's an email.message.Message
+                try:
+                    if raw_message.is_multipart():
+                        for part in raw_message.walk():
+                            content_type = part.get_content_type()
+                            if content_type == 'text/plain' or content_type == 'text/html':
+                                payload = part.get_payload(decode=True)
+                                if payload:
+                                    return payload.decode('utf-8', errors='replace')
+                    else:
+                        payload = raw_message.get_payload(decode=True)
+                        if payload:
+                            return payload.decode('utf-8', errors='replace')
+                except Exception as inner_e:
+                    self.logger.error(f"Error extracting payload: {inner_e}")
+            
+            # Last resort fallback
+            return str(raw_message)[:500]
+
+    def _extract_content_from_full_message(self, full_message, is_forwarded=False):
+        """Extract content from a full email message.
+        
+        Args:
+            full_message (str): The complete email message
+            is_forwarded (bool): Whether this is a forwarded email
+            
+        Returns:
+            str: Extracted content
+        """
+        if not full_message:
+            return ""
+            
+        try:
+            # Check if this is an HTML message
+            is_html = '<html' in full_message.lower() or '<div' in full_message.lower()
+            
+            if is_html:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(full_message, 'html.parser')
+                
+                # For forwarded emails, look for specific markers 
+                if is_forwarded:
+                    # Look for Gmail's forwarded message quote
+                    gmail_quote = soup.select_one('.gmail_quote')
+                    if gmail_quote:
+                        logger.info("Found Gmail quote in forwarded email")
+                        return gmail_quote.get_text(separator='\n')
+                    
+                    # Look for common forwarded message markers in the text
+                    for marker in ["---------- Forwarded message ---------", 
+                                  "Begin forwarded message:", 
+                                  "Forwarded message", 
+                                  "Original Message"]:
+                        marker_elements = soup.find_all(string=lambda s: s and marker in s)
+                        if marker_elements:
+                            for element in marker_elements:
+                                # Get the parent and all content after it
+                                parent = element.parent
+                                if parent:
+                                    content = parent.get_text(separator='\n')
+                                    # Also get all siblings after this element
+                                    for sibling in parent.next_siblings:
+                                        if sibling.name and sibling.get_text():
+                                            content += '\n' + sibling.get_text(separator='\n')
+                                    
+                                    if len(content) > 200:
+                                        logger.info(f"Extracted content after marker: {marker}")
+                                        return content
+                    
+                    # Look for elements with specific styles that indicate forwarded content
+                    for element in soup.find_all(['div', 'blockquote']):
+                        style = element.get('style', '')
+                        if 'border' in style or 'margin' in style or 'padding' in style:
+                            content = element.get_text(separator='\n')
+                            if len(content) > 200:
+                                logger.info("Found styled element that may contain forwarded content")
+                                return content
+                
+                # If no specific forwarded content found, extract all text
+                if soup.body:
+                    return soup.body.get_text(separator='\n')
+                else:
+                    return soup.get_text(separator='\n')
+            else:
+                # For plain text, use different approach
+                import re
+                
+                if is_forwarded:
+                    # Look for forwarded message markers in plain text
+                    for marker in ["---------- Forwarded message ---------", 
+                                  "Begin forwarded message:", 
+                                  "Forwarded message", 
+                                  "Original Message"]:
+                        if marker in full_message:
+                            # Extract content after the marker
+                            parts = full_message.split(marker, 1)
+                            if len(parts) > 1:
+                                logger.info(f"Found forwarded marker in plain text: {marker}")
+                                return parts[1]
+                    
+                    # Look for email headers that indicate forwarded content
+                    header_pattern = r"From:.*?\nDate:.*?\nSubject:.*?\nTo:"
+                    match = re.search(header_pattern, full_message, re.DOTALL)
+                    if match:
+                        # Get everything after the headers
+                        headers_end = match.end()
+                        if headers_end < len(full_message):
+                            logger.info("Found forwarded email headers in plain text")
+                            return full_message[headers_end:]
+                
+                # If no specific pattern found, return the whole message
+                return full_message
+                
+        except Exception as e:
+            logger.error(f"Error extracting content from full message: {e}", exc_info=True)
+            return full_message
+
+    def _extract_content_from_raw(self, raw_content, is_forwarded=False):
+        """Extract content from raw content.
+        
+        Args:
+            raw_content (str): The raw content
+            is_forwarded (bool): Whether the message is forwarded
+            
+        Returns:
+            str: Extracted content
+        """
+        if not raw_content:
             return ""
         
-        if isinstance(data, str):
-            return data
-        
-        best_content = ""
-        
-        if isinstance(data, dict):
-            # First check common content keys
-            for key in ['html', 'text', 'content', 'body', 'message', 'payload', 'value', 'data', 'source', 'parsed']:
-                if key in data and isinstance(data[key], str) and len(data[key]) > len(best_content):
-                    best_content = data[key]
-                
-            # Special handling for Gmail structure
-            if 'payload' in data and isinstance(data['payload'], dict):
-                # Gmail specific - check for parts array
-                if 'parts' in data['payload'] and isinstance(data['payload']['parts'], list):
-                    for part in data['payload']['parts']:
-                        if isinstance(part, dict) and 'body' in part and 'data' in part['body']:
-                            content = self._deep_search_content(part['body']['data'], depth + 1, max_depth)
-                            if len(content) > len(best_content):
-                                best_content = content
+        try:
+            # If it's JSON, try to parse it
+            if isinstance(raw_content, str) and (raw_content.startswith('{') or raw_content.startswith('[')):
+                import json
+                try:
+                    data = json.loads(raw_content)
+                    if isinstance(data, dict):
+                        for key in ['content', 'main_content', 'text', 'html']:
+                            if key in data and data[key]:
+                                content = data[key]
+                                if isinstance(content, str) and len(content) > 100:
+                                    return content
+                except:
+                    # Not valid JSON, continue with raw content as is
+                    pass
             
-            # Then search all keys
-            for key, value in data.items():
-                content = self._deep_search_content(value, depth + 1, max_depth)
-                if len(content) > len(best_content):
-                    best_content = content
-                
-        elif isinstance(data, list):
-            for item in data:
-                content = self._deep_search_content(item, depth + 1, max_depth)
-                if len(content) > len(best_content):
-                    best_content = content
+            # If it's a string, treat it as HTML or plain text
+            if isinstance(raw_content, str):
+                return self._extract_content_from_full_message(raw_content, is_forwarded)
+            
+            # If it's a dict, try to get content fields
+            if isinstance(raw_content, dict):
+                for key in ['content', 'main_content', 'text', 'html']:
+                    if key in raw_content and raw_content[key]:
+                        content = raw_content[key]
+                        if isinstance(content, str) and len(content) > 100:
+                            return content
+            
+            # Convert to string as a last resort
+            return str(raw_content)
         
-        # If content is HTML, try to extract just the meaningful text from it to detect 
-        # if it's an empty HTML template
-        if best_content and '<html' in best_content.lower():
-            try:
-                # Check if this is valid HTML with actual content
-                soup = BeautifulSoup(best_content, 'html.parser')
-                text_only = soup.get_text(strip=True)
-                
-                # If the text content is very short, this might be an empty template
-                if len(text_only) < 50:
-                    logger.warning(f"Found HTML content but it has very little text ({len(text_only)} chars)")
-                    best_content = text_only if text_only else best_content
-            except Exception as e:
-                logger.error(f"Error parsing potential HTML content: {e}")
-                
-        return best_content 
+        except Exception as e:
+            logger.error(f"Error extracting content from raw content: {e}", exc_info=True)
+            return str(raw_content)
+
+    def _clean_text(self, text_content):
+        """Clean plain text content.
+        
+        Args:
+            text_content (str): Text content to clean
+            
+        Returns:
+            str: Cleaned text
+        """
+        if not text_content:
+            return ""
+        
+        # Normalize line endings
+        text = text_content.replace('\r\n', '\n').replace('\r', '\n')
+        
+        # Split into lines
+        lines = text.splitlines()
+        
+        # Remove empty lines
+        non_empty_lines = [line.strip() for line in lines if line.strip()]
+        
+        # Join back with newlines
+        cleaned_text = '\n'.join(non_empty_lines)
+        
+        return cleaned_text 

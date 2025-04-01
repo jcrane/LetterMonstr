@@ -55,8 +55,22 @@ class DateTimeEncoder(json.JSONEncoder):
         return super().default(obj)
 
 def json_serialize(obj):
-    """Serialize object to JSON with datetime handling."""
-    return json.dumps(obj, cls=DateTimeEncoder)
+    """Serialize object to JSON, handling special types."""
+    def default_serializer(obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        # Handle email Message objects by converting to string
+        elif hasattr(obj, 'as_string') and callable(obj.as_string):
+            return "Email Message Object"
+        # Handle any other non-serializable objects
+        else:
+            return str(obj)
+    
+    try:
+        return json.dumps(obj, default=default_serializer)
+    except:
+        # Last resort: convert the entire object to a string
+        return json.dumps(str(obj))
 
 class PeriodicFetcher:
     """Handles periodic fetching and processing of emails."""
@@ -262,7 +276,7 @@ class PeriodicFetcher:
                 email_id,
                 email['subject'],
                 email.get('date'),
-                content_source.get('is_full_email', False),
+                is_forwarded,
                 parsed_content  # Pass the full parsed content
             )
             
@@ -476,27 +490,51 @@ class PeriodicFetcher:
             logger.error(f"Error storing email content: {e}", exc_info=True)
             return None
             
-    def _process_content_source(self, session, content, content_type, email_id, subject, date, is_full_email=False, email_data=None):
+    def _process_content_source(self, session, content, content_type, email_id, subject, date, is_forwarded=False, email_data=None):
         """Process a single content source and create ProcessedContent entry."""
         try:
-            # Apply content processor for cleaning and formatting
-            processed_text = self.content_processor.clean_content(content, content_type)
+            # Initialize content processor if needed
+            if not hasattr(self, 'content_processor'):
+                logger.info("Initializing ContentProcessor")
+                from src.summarize.processor import ContentProcessor
+                self.content_processor = ContentProcessor(self.db_path)
             
-            # Create a content object for processing
-            content_obj = {
+            # Skip if already processed based on URL for non-email content
+            if email_id is None and content_type == 'article':
+                source_url = content.get('url', '')
+                if source_url:
+                    existing = session.query(ProcessedContent).filter_by(url=source_url).first()
+                    if existing:
+                        logger.info(f"Content already exists with URL: {source_url}")
+                        return existing
+            
+            # Sanitize the email data to ensure it can be serialized
+            sanitized_email_data = self._sanitize_for_json(email_data) if email_data else None
+            
+            # Create content item for processing
+            content_item = {
                 'source': subject,
-                'content': processed_text,
                 'date': date,
-                'original_email': email_data
+                'content_type': content_type,
+                'is_forwarded': is_forwarded,
+                'email_content': sanitized_email_data
             }
             
-            # Apply any additional processing/deduplication
-            processed_items = self.content_processor.process_and_deduplicate([content_obj])
+            # For email content, set the content directly
+            if content_type in ['html', 'text'] and content:
+                content_item['content'] = content
+            
+            # For crawled content, structure differently
+            if content_type == 'article':
+                content_item['crawled_content'] = [content]
+            
+            # Process the content item
+            processed_items = self.content_processor.process_and_deduplicate([content_item])
             
             if not processed_items:
-                logger.warning(f"No processed content returned for {subject}")
+                logger.warning(f"No processed items returned for: {subject}")
                 return None
-                
+            
             processed_item = processed_items[0]  # Take the first item
             
             # Generate content hash for deduplication
@@ -507,7 +545,7 @@ class PeriodicFetcher:
             if existing:
                 logger.info(f"Content already exists with hash: {content_hash}")
                 return existing
-                
+            
             # Create ProcessedContent entry
             processed_content = ProcessedContent(
                 content_hash=content_hash,
@@ -528,6 +566,30 @@ class PeriodicFetcher:
         except Exception as e:
             logger.error(f"Error processing content source: {e}", exc_info=True)
             return None
+
+    def _sanitize_for_json(self, obj):
+        """Sanitize an object for JSON serialization by removing or converting problematic fields."""
+        if obj is None:
+            return None
+        
+        if isinstance(obj, dict):
+            # Create a new cleaned dictionary
+            result = {}
+            for key, value in obj.items():
+                # Skip any raw_message or message fields that might contain email.Message objects
+                if key in ['raw_message', 'message']:
+                    continue
+                    
+                # Recursively sanitize nested dictionaries and lists
+                result[key] = self._sanitize_for_json(value)
+            return result
+        elif isinstance(obj, list):
+            return [self._sanitize_for_json(item) for item in obj]
+        elif isinstance(obj, (str, int, float, bool)) or obj is None:
+            return obj
+        else:
+            # Convert any other types to string
+            return str(obj)
 
     def _process_emails(self, emails, gmail_service=None):
         """Process new emails and extract content"""
@@ -588,6 +650,56 @@ class PeriodicFetcher:
                 logger.error(f"Error processing email {email.get('id', 'unknown')}: {e}", exc_info=True)
         
         return processed_count
+
+    def _process_crawled_content(self, crawled_content, url, email_id, link_data, session):
+        """Process crawled content from a link."""
+        try:
+            # Skip if no content
+            if not crawled_content:
+                logger.warning(f"No crawled content for URL: {url}")
+                return
+            
+            for content in crawled_content:
+                # Skip ad content
+                if content.get('is_ad', False):
+                    logger.info(f"Skipping ad content from {url}")
+                    continue
+                
+                # Get link information
+                title = content.get('title', link_data.get('title', 'No Title'))
+                content_text = content.get('content', '')
+                
+                # Ensure we have actual content before proceeding
+                if not content_text or len(content_text.strip()) < 50:
+                    logger.warning(f"Insufficient content from URL: {url}, skipping")
+                    continue
+                
+                # Create content item for processing
+                content_item = {
+                    'source': title,
+                    'url': url,
+                    'content': content_text,
+                    'content_type': 'article',
+                    'crawled_date': datetime.now().isoformat()
+                }
+                
+                # Process the content item
+                processed_content = self._process_content_source(
+                    session, 
+                    content_item,
+                    'article',
+                    email_id,
+                    title,
+                    datetime.now()
+                )
+                
+                if processed_content:
+                    logger.info(f"Successfully processed content from URL: {url}")
+                else:
+                    logger.warning(f"Failed to process content from URL: {url}")
+        
+        except Exception as e:
+            logger.error(f"Error processing crawled content from {url}: {e}", exc_info=True)
 
 def load_config():
     """Load configuration from YAML file."""

@@ -26,35 +26,124 @@ class ContentProcessor:
                                 'data', 'lettermonstr.db')
         self.cross_summary_lookback_days = 7  # Reduced from 14 to 7 days
     
+    def _generate_content_fingerprint(self, content):
+        """Generate a fingerprint for content to use in deduplication.
+        
+        Args:
+            content (str): Content to fingerprint
+            
+        Returns:
+            str: A hash representing the content fingerprint
+        """
+        if not content or not isinstance(content, str):
+            return hashlib.md5("empty_content".encode('utf-8')).hexdigest()
+            
+        # Take the first 1000 characters to create a fingerprint
+        # This is enough to identify duplicate content without using the full text
+        fingerprint_text = content[:1000]
+        
+        # Create a hash of the text
+        return hashlib.md5(fingerprint_text.encode('utf-8')).hexdigest()
+    
     def process_and_deduplicate(self, content_items):
-        """Process and deduplicate content from different sources."""
+        """Process and deduplicate content items.
+        
+        Args:
+            content_items (list): List of content items to process.
+            
+        Returns:
+            list: List of deduplicated content items.
+        """
         if not content_items:
-            logger.warning("No content items to process")
             return []
-        
-        processed_items = []
-        
+            
         try:
-            # First pass: process each content item
+            # Log the starting count
+            logger.info(f"Starting deduplication of {len(content_items)} items")
+            
+            # Ensure all items have required fields
+            preprocessed_items = []
             for item in content_items:
-                processed_item = self._process_item(item)
-                if processed_item:
-                    processed_items.append(processed_item)
+                # Skip empty items
+                if not item:
+                    continue
+                    
+                # Make a copy to avoid modifying the original
+                item_copy = dict(item)
+                
+                # Ensure we have a source field
+                if 'source' not in item_copy or not item_copy['source']:
+                    item_copy['source'] = 'Unknown Source'
+                    
+                # Ensure we have content
+                if 'content' not in item_copy or not item_copy['content']:
+                    # Try to find content in other fields
+                    if 'text' in item_copy and item_copy['text']:
+                        item_copy['content'] = item_copy['text']
+                    elif 'raw_content' in item_copy and item_copy['raw_content']:
+                        item_copy['content'] = item_copy['raw_content']
+                    elif 'main_content' in item_copy and item_copy['main_content']:
+                        item_copy['content'] = item_copy['main_content']
+                    elif 'html' in item_copy and item_copy['html']:
+                        # Clean HTML to text
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(item_copy['html'], 'html.parser')
+                        item_copy['content'] = soup.get_text(separator='\n')
+                    else:
+                        # No content found, try to use source or title as minimal content
+                        item_copy['content'] = item_copy.get('title', item_copy['source'])
+                        logger.warning(f"No content found for item: {item_copy['source']}")
+                
+                # Clean the content
+                content_type = item_copy.get('content_type', 'text')
+                item_copy['content'] = self.clean_content(item_copy['content'], content_type)
+                
+                # If content is very short, log a warning
+                if len(item_copy['content']) < 100:
+                    logger.warning(f"Very short content for source: {item_copy['source']}, length: {len(item_copy['content'])}")
+                
+                # Add additional fields if needed
+                if 'date' not in item_copy:
+                    item_copy['date'] = datetime.now()
+                    
+                # Add to preprocessed items if content is not empty
+                if item_copy['content'].strip():
+                    preprocessed_items.append(item_copy)
             
-            # Second pass: deduplicate content within this batch
-            deduplicated_items = self._deduplicate_content(processed_items)
+            # Generate content fingerprints for deduplication
+            fingerprinted_items = []
+            content_fingerprints = set()
             
-            # Third pass: deduplicate against previously summarized content
-            final_items = self._filter_previously_summarized(deduplicated_items)
+            for item in preprocessed_items:
+                # Generate a fingerprint
+                fingerprint = self._generate_content_fingerprint(item['content'])
+                
+                # Check if this is a duplicate
+                if fingerprint in content_fingerprints:
+                    logger.debug(f"Skipping duplicate item: {item['source']}")
+                    continue
+                
+                # Store the fingerprint
+                content_fingerprints.add(fingerprint)
+                
+                # Add to deduplicated items
+                fingerprinted_items.append(item)
             
-            # Sort by date, newest first
-            sorted_items = sorted(final_items, key=lambda x: x['date'], reverse=True)
+            # Log the results
+            original_count = len(content_items)
+            deduplicated_count = len(fingerprinted_items)
             
-            return sorted_items
+            logger.info(f"Deduplication: {original_count} original items → {deduplicated_count} deduplicated items")
+            logger.info(f"Preserved {deduplicated_count} unique items, merged {original_count - deduplicated_count} similar items")
             
+            # Apply historical deduplication across summaries if needed
+            final_items = self._filter_previously_summarized(fingerprinted_items)
+            
+            return final_items
+        
         except Exception as e:
-            logger.error(f"Error processing content: {e}", exc_info=True)
-            return processed_items
+            logger.error(f"Error in process_and_deduplicate: {e}", exc_info=True)
+            return content_items[:10]  # Return at most 10 items in case of error
     
     def _filter_previously_summarized(self, items):
         """Filter out content that has already been included in previous summaries."""
@@ -67,15 +156,19 @@ class ContentProcessor:
             # Get lookback date
             lookback_date = datetime.now() - timedelta(days=self.cross_summary_lookback_days)
             
-            # Get all content signatures from recent summaries
-            historical_signatures = session.query(SummarizedContent).filter(
-                SummarizedContent.date_summarized >= lookback_date
+            # Get all content signatures from recent SENT summaries only
+            historical_signatures = session.query(SummarizedContent).join(
+                SummarizedContent.summary
+            ).filter(
+                SummarizedContent.date_summarized >= lookback_date,
+                SummarizedContent.summary.has(sent=True)  # Only from sent summaries
             ).all()
             
             logger.info(f"Found {len(historical_signatures)} historical content signatures for cross-summary deduplication")
             
             # If no historical signatures, return all items
             if not historical_signatures:
+                logger.info("No historical content found from sent summaries, using all items")
                 return items
                 
             # Prepare historical data for comparison
@@ -460,61 +553,117 @@ class ContentProcessor:
         # Higher threshold for titles
         return similarity >= self.title_similarity_threshold
     
-    def clean_content(self, content, content_type='html'):
-        """Clean and format content for processing.
+    def clean_content(self, content, content_type='text'):
+        """Clean content based on content type.
+        
+        Handles various input content formats (str, dict) and extracts the most
+        meaningful content.
         
         Args:
-            content (str): The content to clean
-            content_type (str): The type of content ('html' or 'text')
+            content: Content to clean, can be string or dict
+            content_type: Type of content ('text', 'html', etc.)
             
         Returns:
-            str: The cleaned content
+            str: Cleaned content
         """
-        if not content:
-            return ""
-            
         try:
-            if content_type.lower() == 'html':
-                # Use BeautifulSoup to clean HTML
+            # Handle different input types
+            if content is None:
+                return ""
+                
+            # Handle dictionary input
+            if isinstance(content, dict):
+                # Try various fields that might contain the actual content
+                for field in ['content', 'main_content', 'raw_content', 'text', 'html']:
+                    if field in content and content[field]:
+                        # Recursively clean the content from this field
+                        return self.clean_content(content[field], content_type)
+                
+                # If we get here, we didn't find any content field
+                logger.warning(f"Dict content without valid content field, keys: {list(content.keys())}")
+                return ""
+            
+            # Convert to string if not already
+            if not isinstance(content, str):
+                content = str(content)
+            
+            # Skip if empty
+            if not content.strip():
+                return ""
+            
+            # Process based on content type
+            if content_type == 'html':
+                from bs4 import BeautifulSoup
                 try:
-                    from bs4 import BeautifulSoup
+                    # Parse with BeautifulSoup
                     soup = BeautifulSoup(content, 'html.parser')
                     
-                    # Remove script, style, and ad-related elements
-                    for element in soup(["script", "style", "iframe", "ins", "aside"]):
-                        element.extract()
+                    # Remove script and style tags
+                    for tag in soup(['script', 'style', 'header', 'footer', 'nav']):
+                        tag.decompose()
                     
-                    # Remove common ad containers
-                    for ad_class in ['ad', 'ads', 'advertisement', 'banner', 'sponsored', 'promotion']:
-                        for element in soup.find_all(class_=lambda c: c and ad_class in c.lower()):
-                            element.extract()
+                    # Extract text
+                    text = soup.get_text(separator='\n')
                     
-                    # Extract text with proper spacing
-                    lines = []
-                    for element in soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li']):
-                        text = element.get_text(strip=True)
-                        if text:
-                            lines.append(text)
-                    
-                    # Join lines with newlines based on element type
-                    cleaned_text = '\n\n'.join(lines)
-                    
-                    # Clean up any excessive whitespace
-                    cleaned_text = '\n'.join(line.strip() for line in cleaned_text.splitlines() if line.strip())
+                    # Basic cleaning
+                    cleaned_text = self._clean_text(text)
                     
                     return cleaned_text
-                    
                 except Exception as e:
-                    logger.error(f"Error cleaning HTML content: {e}")
-                    # Fall back to simpler text extraction
-                    from bs4 import BeautifulSoup
-                    soup = BeautifulSoup(content, 'html.parser')
-                    return soup.get_text(separator='\n')
+                    logger.warning(f"Error cleaning HTML content: {e}")
+                    # Fallback to text cleaning
+                    return self._clean_text(content)
             else:
-                # For plain text, just clean up whitespace
-                lines = [line.strip() for line in content.splitlines() if line.strip()]
-                return '\n'.join(lines)
+                # Text content
+                return self._clean_text(content)
                 
         except Exception as e:
-            logger.error(f"Error in clean_content: {e}")
-            return content  # Return original content on error 
+            logger.error(f"Error cleaning content: {e}", exc_info=True)
+            # Return a safe fallback
+            if isinstance(content, str):
+                return content[:1000]  # Return truncated original
+            elif isinstance(content, dict) and 'source' in content:
+                return f"Content from {content['source']}"
+            else:
+                return ""
+    
+    def _clean_text(self, text):
+        """Clean plain text content.
+        
+        Removes excessive whitespace, normalizes line breaks, and performs other
+        basic text cleanup.
+        
+        Args:
+            text (str): Text to clean
+            
+        Returns:
+            str: Cleaned text
+        """
+        if not text or not isinstance(text, str):
+            return ""
+            
+        # Normalize line endings
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        
+        # Remove excess whitespace
+        lines = [line.strip() for line in text.split('\n')]
+        
+        # Remove empty lines and join
+        cleaned = '\n'.join(line for line in lines if line)
+        
+        # Remove very common email footers
+        for footer in [
+            "Sent from my iPhone",
+            "Sent from my mobile device",
+            "Get Outlook for",
+            "If you received this email in error",
+            "To unsubscribe",
+            "View this email in your browser"
+        ]:
+            if footer in cleaned:
+                # Find the footer position and truncate
+                pos = cleaned.find(footer)
+                if pos > len(cleaned) // 2:  # Only if in second half of content
+                    cleaned = cleaned[:pos]
+        
+        return cleaned 
