@@ -233,10 +233,10 @@ def generate_and_send_summary(force=False):
             email_fetcher = EmailFetcher(config['email'])
             
             # Check if we've already sent a summary for recent content
-            yesterday = datetime.now() - timedelta(days=1)
+            today = datetime.now().date()
             recent_summaries = session.query(Summary).filter(
                 Summary.sent == True,
-                Summary.period_end >= yesterday
+                Summary.creation_date >= today
             ).order_by(Summary.creation_date.desc()).first()
             
             # If we found a recent summary, just mark the content as summarized and exit
@@ -298,7 +298,7 @@ def generate_and_send_summary(force=False):
                 logger.info(f"Estimated total tokens: {estimated_tokens}")
                 
                 # Set a safe batch limit (less than Claude's 200k limit)
-                TOKEN_BATCH_LIMIT = 100000
+                TOKEN_BATCH_LIMIT = 25000
                 
                 # Generate summary
                 logger.info("Generating summary...")
