@@ -10,8 +10,10 @@ import time
 import json
 from datetime import datetime
 from anthropic import Anthropic
+import hashlib
 
-from src.database.models import get_session, Summary
+from src.database.models import get_session, Summary, ProcessedContent
+from src.summarize.claude_summarizer import create_claude_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +50,12 @@ class SummaryGenerator:
             summary_text = self._call_claude_api(prompt)
             
             # Store the summary in the database
-            self._store_summary(summary_text, processed_content)
+            summary_id = self._store_summary(summary_text, processed_content)
+            
+            # Store content signatures for future deduplication
+            from src.summarize.processor import ContentProcessor
+            content_processor = ContentProcessor({'ad_keywords': []})
+            content_processor.store_summarized_content(summary_id, processed_content)
             
             return summary_text
             
@@ -181,8 +188,13 @@ class SummaryGenerator:
                     
                     # Filter out tracking/redirect URLs
                     if self._is_tracking_url(url):
-                        logger.warning(f"Skipping tracking URL: {url}")
-                        continue
+                        # Try to unwrap the tracking URL
+                        unwrapped_url = self._unwrap_tracking_url(url)
+                        if unwrapped_url:
+                            url = unwrapped_url
+                        else:
+                            logger.warning(f"Skipping tracking URL that couldn't be unwrapped: {url}")
+                            continue
                         
                     if url and ('web' in title or 'browser' in title or 'view' in title):
                         source_links.append(f"WEB VERSION: {link.get('title', 'Web Version')} - {url}")
@@ -194,10 +206,15 @@ class SummaryGenerator:
                 article_url = article.get('url', '')
                 article_title = article.get('title', '')
                 
-                # Filter out tracking/redirect URLs
+                # Filter out tracking/redirect URLs or unwrap them
                 if self._is_tracking_url(article_url):
-                    logger.warning(f"Skipping tracking URL for article '{article_title}': {article_url}")
-                    continue
+                    # Try to unwrap the tracking URL
+                    unwrapped_url = self._unwrap_tracking_url(article_url)
+                    if unwrapped_url:
+                        article_url = unwrapped_url
+                    else:
+                        logger.warning(f"Skipping tracking URL for article '{article_title}': {article_url}")
+                        continue
                     
                 if article_url and article_title:
                     source_links.append(f"ARTICLE: {article_title} - {article_url}")
@@ -225,15 +242,17 @@ class SummaryGenerator:
     
     def _create_summary_prompt(self, content):
         """Create a prompt for Claude to generate a summary."""
-        prompt = f"""
-You are a newsletter summarization assistant for the LetterMonstr application.
-Your task is to create a COMPREHENSIVE summary of the following newsletter content.
-
+        instructions = """
 Follow these guidelines:
 1. MOST IMPORTANT: Be thorough and comprehensive - include ALL meaningful content, stories, and insights from the source material.
 2. Do not omit any significant articles, stories or topics from the newsletters.
 3. Focus on factual information and key insights.
-4. Remove any redundancy or duplicate information across different sources.
+4. AGGRESSIVELY REMOVE DUPLICATES: Many articles will appear multiple times across different newsletters.
+   - When you see the same story covered in multiple sources, combine them into a SINGLE summary
+   - Identify articles with the same topic or subject matter even if the titles differ
+   - Look for identical or nearly identical content and only include it once
+   - Include all unique details, but don't repeat the same information
+   - Mention if an item was covered by multiple sources, but only summarize it once
 5. Organize information by topic, not by source.
 6. Remove any content that appears to be advertising or sponsored.
 7. Include important details like dates, statistics, and key findings.
@@ -257,13 +276,9 @@ The summary should be thorough and detailed, prioritizing completeness over brev
 Make sure all "Read more" links are properly formatted as HTML <a> tags so they're clickable in the email.
 
 IMPORTANT: Format for proper HTML email display. DO include HTML formatting and ensure all links are properly formatted as <a href="url">link text</a>.
-
-CONTENT TO SUMMARIZE:
-{content}
-
-Please provide a detailed and comprehensive summary of the above content, organized by topic and including ALL significant stories and articles with proper "Read more" links after each summary item.
 """
-        return prompt
+        # Use the shared prompt generator with our specific instructions
+        return create_claude_prompt(instructions, content)
     
     def _call_claude_api(self, prompt):
         """Call Claude API to generate summary."""
@@ -299,74 +314,59 @@ Please provide a detailed and comprehensive summary of the above content, organi
             return f"Error generating summary: {str(e)}"
     
     def _store_summary(self, summary_text, processed_content):
-        """Store the generated summary in the database."""
+        """Store the summary and mark content as summarized."""
+        if not summary_text or not processed_content:
+            return None
+            
+        # Open database session
+        session = get_session(self.db_path)
         try:
-            # Calculate period start and end dates
-            dates = []
+            # Create summary record
+            summary = Summary(
+                summary_type='daily',
+                summary_text=summary_text,
+                period_start=datetime.now(),
+                period_end=datetime.now(),
+                creation_date=datetime.now(),
+                sent=False
+            )
+            
+            session.add(summary)
+            session.flush()  # Get the ID
+            
+            # Update processed content records to mark them as summarized
+            content_hashes = []
             for item in processed_content:
-                date_value = item.get('date', datetime.now())
-                # Convert string dates to datetime objects
-                if isinstance(date_value, str):
-                    try:
-                        # Try to parse the date string - handle different formats
-                        # First try ISO format
-                        try:
-                            date_value = datetime.fromisoformat(date_value.replace('Z', '+00:00'))
-                        except ValueError:
-                            # If that fails, try a more flexible approach
-                            import dateutil.parser
-                            date_value = dateutil.parser.parse(date_value)
-                        dates.append(date_value)
-                    except Exception as e:
-                        logger.warning(f"Could not parse date string '{date_value}': {e}")
-                        # Use current time as fallback
-                        dates.append(datetime.now())
-                else:
-                    dates.append(date_value)
+                # Create content hash for lookup
+                content = item.get('content', '')
+                title = item.get('source', '')
+                content_hash = hashlib.md5((title + content[:100]).encode('utf-8')).hexdigest()
+                content_hashes.append(content_hash)
             
-            # Use current time if no valid dates found
-            if not dates:
-                period_start = period_end = datetime.now()
-            else:
-                period_start = min(dates)
-                period_end = max(dates)
+            # Update the processed content items
+            session.query(ProcessedContent).filter(
+                ProcessedContent.content_hash.in_(content_hashes)
+            ).update(
+                {
+                    'is_summarized': True,
+                    'summary_id': summary.id
+                },
+                synchronize_session=False
+            )
             
-            # Determine summary type based on timespan
-            days_span = (period_end - period_start).days
-            if days_span <= 1:
-                summary_type = 'daily'
-            elif days_span <= 7:
-                summary_type = 'weekly'
-            else:
-                summary_type = 'monthly'
+            # Commit changes
+            session.commit()
+            logger.info(f"Stored summary {summary.id} and marked {len(content_hashes)} content items as summarized")
             
-            # Create summary entry
-            session = get_session(self.db_path)
+            return summary.id
             
-            try:
-                summary = Summary(
-                    period_start=period_start,
-                    period_end=period_end,
-                    summary_type=summary_type,
-                    summary_text=summary_text,
-                    creation_date=datetime.now(),
-                    sent=False
-                )
-                
-                session.add(summary)
-                session.commit()
-                
-                logger.info(f"Stored {summary_type} summary in database")
-                
-            except Exception as e:
-                session.rollback()
-                logger.error(f"Error storing summary: {e}", exc_info=True)
-            finally:
-                session.close()
-                
         except Exception as e:
-            logger.error(f"Error in _store_summary: {e}", exc_info=True)
-            
+            logger.error(f"Error storing summary: {e}", exc_info=True)
+            session.rollback()
+            return None
+        finally:
+            session.close()
+    
     def combine_summaries(self, summaries):
         """Combine multiple summaries into one comprehensive summary."""
         if not summaries:
@@ -375,8 +375,13 @@ Please provide a detailed and comprehensive summary of the above content, organi
         if len(summaries) == 1:
             return summaries[0]
         
-        # Create a prompt to combine the summaries
-        combined_prompt = f"""
+        # Format the summaries with separators
+        formatted_content = ""
+        for i, summary in enumerate(summaries):
+            formatted_content += f"\n{'==='*20}\n{summary}\n{'==='*20}\n\n"
+        
+        # Create instructions for combining summaries
+        instructions = """
 You are a newsletter summarization assistant for the LetterMonstr application.
 Your task is to combine multiple newsletter summaries into one comprehensive summary.
 
@@ -390,37 +395,14 @@ Please combine these summaries into a single coherent summary that:
 5. Keeps all relevant links
 6. Improves the overall flow and readability
 
-SUMMARIES TO COMBINE:
-
-{'==='*20}
-{summaries[0]}
-{'==='*20}
-
-{'==='*20}
-{summaries[1]}
-{'==='*20}
-
-"""
-        
-        # If there are more than 2 summaries, add them with separators
-        if len(summaries) > 2:
-            for i in range(2, len(summaries)):
-                combined_prompt += f"""
-{'==='*20}
-{summaries[i]}
-{'==='*20}
-
-"""
-        
-        # Complete the prompt
-        combined_prompt += """
 Please provide a single comprehensive and well-organized summary that combines all of the above information,
 eliminating redundancy while preserving all significant content and links.
 """
         
         try:
-            # Call Claude API
+            # Call Claude API with the combined prompt
             logger.info(f"Combining {len(summaries)} summaries into one")
+            combined_prompt = create_claude_prompt(instructions, formatted_content)
             combined_summary = self._call_claude_api(combined_prompt)
             return combined_summary
         except Exception as e:
@@ -429,7 +411,7 @@ eliminating redundancy while preserving all significant content and links.
             fallback = "# COMBINED NEWSLETTER SUMMARY\n\n"
             for i, summary in enumerate(summaries):
                 fallback += f"## Batch {i+1} Summary\n\n{summary}\n\n---\n\n"
-            return fallback 
+            return fallback
 
     def _is_tracking_url(self, url):
         """Check if a URL is a tracking or redirect URL."""
@@ -449,6 +431,13 @@ eliminating redundancy while preserving all significant content and links.
             'sendgrid.net',
             'email.mg.substack.com',
             'url9934.notifications.substack.com',
+            'tracking.tldrnewsletter.com',
+            'beehiiv.com',
+            'substack.com',
+            'mailchimp.com',
+            'convertkit.com',
+            'constantcontact.com',
+            'hubspotemail.net',
         ]
         
         # Check if the URL contains any of the tracking domains
@@ -466,10 +455,101 @@ eliminating redundancy while preserving all significant content and links.
             'utm_campaign=',
             'referrer=',
             '/ss/c/',  # Beehiiv specific pattern
+            'CL0/',    # TLDR newsletter pattern
+            'link.alphasignal.ai', # Another common newsletter service
         ]
         
         for pattern in redirect_patterns:
             if pattern in url:
                 return True
                 
-        return False 
+        return False
+
+    def _unwrap_tracking_url(self, url):
+        """Extract the actual destination URL from a tracking/redirect URL."""
+        if not url or not isinstance(url, str):
+            return url
+            
+        # Don't try to unwrap if it's not a tracking URL
+        if not self._is_tracking_url(url):
+            return url
+            
+        try:
+            # Special handling for beehiiv URLs which often don't contain the actual destination
+            # in an easily extractable format - these URLs are challenging to unwrap
+            if 'beehiiv.com' in url or 'link.mail.beehiiv.com' in url:
+                logger.info(f"Found beehiiv tracking URL: {url}")
+                
+                # For beehiiv, we need to check if we can find an embedded destination URL
+                # using multiple patterns as beehiiv formats vary
+                
+                # Try pattern 1: URLs sometimes contain a parameter with the destination
+                if 'redirect=' in url:
+                    parts = url.split('redirect=', 1)
+                    if len(parts) > 1:
+                        destination = parts[1]
+                        if '&' in destination:
+                            destination = destination.split('&', 1)[0]
+                        if destination.startswith('http'):
+                            logger.info(f"Extracted beehiiv destination URL from redirect param: {destination}")
+                            return destination
+                
+                # Try pattern 2: Look for patterns like /to/ followed by a URL
+                if '/to/' in url:
+                    parts = url.split('/to/', 1)
+                    if len(parts) > 1:
+                        destination = parts[1]
+                        if destination.startswith('http'):
+                            logger.info(f"Extracted beehiiv destination URL from /to/ pattern: {destination}")
+                            return destination
+                
+                # Try to find any embedded URLs in the beehiiv link - this is a fallback
+                import re
+                url_pattern = r'https?://(?!link\.mail\.beehiiv\.com|beehiiv\.com)(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
+                embedded_urls = re.findall(url_pattern, url)
+                
+                if embedded_urls:
+                    # Get the last URL which is most likely to be the destination
+                    destination = embedded_urls[-1]
+                    logger.info(f"Extracted beehiiv destination URL using regex: {destination}")
+                    return destination
+                
+                # If we can't extract a URL, log this and consider fetching the URL to resolve the redirect
+                logger.warning(f"Could not extract destination from beehiiv URL: {url}")
+                
+                # At this point we can't reliably extract the destination, so we should 
+                # omit this link from the summary rather than showing a tracking URL
+                return None
+            
+            # Handle TLDR newsletter style URLs
+            if 'tracking.tldrnewsletter.com/CL0/' in url:
+                # Extract the URL after CL0/
+                parts = url.split('CL0/', 1)
+                if len(parts) > 1:
+                    # The actual URL is everything after CL0/ and before an optional trailing parameter
+                    actual_url = parts[1].split('/', 1)[0] if '/' in parts[1] else parts[1]
+                    return actual_url
+            
+            # Look for http or https in the URL, which often indicates the start of the actual destination
+            import re
+            embedded_urls = re.findall(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+', url)
+            
+            if embedded_urls:
+                # Get the last http(s) URL in the string, which is typically the destination
+                # Skip the first one if it's the tracking domain itself
+                for embedded_url in embedded_urls:
+                    # Skip if it's one of our known tracking domains
+                    is_tracking = any(domain in embedded_url for domain in [
+                        'beehiiv.com', 'substack.com', 'mailchimp.com', 
+                        'tracking.tldrnewsletter.com', 'link.mail.beehiiv.com'
+                    ])
+                    
+                    if not is_tracking:
+                        return embedded_url
+                        
+            # If we can't extract a clear URL, return None
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error unwrapping tracking URL {url}: {e}", exc_info=True)
+            return None 

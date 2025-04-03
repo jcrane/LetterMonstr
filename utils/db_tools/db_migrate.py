@@ -55,7 +55,7 @@ def create_processed_content_table(conn):
         processed_content TEXT NOT NULL,
         content_metadata TEXT,
         date_processed TIMESTAMP NOT NULL,
-        summarized BOOLEAN NOT NULL DEFAULT 0,
+        is_summarized BOOLEAN NOT NULL DEFAULT 0,
         summary_id INTEGER,
         FOREIGN KEY (email_id) REFERENCES processed_email (id),
         FOREIGN KEY (summary_id) REFERENCES summary (id)
@@ -64,7 +64,7 @@ def create_processed_content_table(conn):
     
     # Create indexes
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_content_hash ON processed_content (content_hash)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_summarized ON processed_content (summarized)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_is_summarized ON processed_content (is_summarized)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_email_id ON processed_content (email_id)')
     
     conn.commit()

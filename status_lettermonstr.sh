@@ -87,7 +87,7 @@ show_db_info() {
             # Check if processed_content table exists
             if sqlite3 "$DB_FILE" ".tables" | grep -q processed_content; then
                 echo "Processed content items: $(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM processed_content;")"
-                echo "Unsummarized content items: $(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM processed_content WHERE summarized=0;")"
+                echo "Unsummarized content items: $(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM processed_content WHERE is_summarized=0;")"
             fi
             
             echo "Latest summaries:"
