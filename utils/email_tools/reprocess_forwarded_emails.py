@@ -20,6 +20,7 @@ sys.path.insert(0, project_root)
 # Import required modules
 from src.database.models import get_session, ProcessedEmail, ProcessedContent, EmailContent
 
+
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
