@@ -27,7 +27,9 @@ URL HANDLING - EXTREMELY IMPORTANT:
 1. ALWAYS include links to original articles with "Read more →" links for each summarized article.
 2. For each article you summarize, add a properly formatted link: <a href="ACTUAL_URL">Read more →</a>
 3. Use ONLY the direct article URLs provided in the "SOURCE LINKS" section at the end of each content block.
-4. Do not include tracking/redirect URLs that contain domains like:
+4. NEVER create placeholder or example URLs like "example.com" or "https://www.example.com/article-name".
+5. If you can't find a real URL for a specific article, OMIT the "Read more" link entirely, but do not make up a URL.
+6. Do not include tracking/redirect URLs that contain domains like:
    - beehiiv.com
    - link.mail.beehiiv.com
    - mailchimp.com
@@ -35,10 +37,11 @@ URL HANDLING - EXTREMELY IMPORTANT:
    - tracking.tldrnewsletter.com
    - any URL with '/ss/c/' in it
    - any URL with 'CL0/' in it
-5. For each article, check the "SOURCE LINKS" section and use the matching URL for the "Read more" link.
-6. Every article you summarize should have its own "Read more" link unless no valid source URL is available.
-7. The system has already processed and cleaned the content to remove most tracking URLs, ads, and unnecessary elements.
-8. Position each "Read more" link directly after its corresponding article summary.
+7. For each article, carefully look for the matching URL in the SOURCE LINKS section for that specific article.
+8. Every article you summarize should have its own "Read more" link using the REAL URL provided, not a placeholder.
+9. The system has already processed and cleaned the content to remove most tracking URLs, ads, and unnecessary elements.
+10. Position each "Read more" link directly after its corresponding article summary.
+11. ALWAYS double-check that you're using a real URL found in the SOURCE LINKS section, not creating a placeholder URL.
 
 CONTENT QUALITY NOTES:
 1. The system has automatically cleaned the content to remove most ads, tracking elements, and extraneous content.

@@ -24,7 +24,7 @@ class ContentProcessor:
         self.title_similarity_threshold = 0.95  # Raised to require very high title similarity
         self.db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 
                                 'data', 'lettermonstr.db')
-        self.cross_summary_lookback_days = 7  # Reduced from 14 to 7 days
+        self.cross_summary_lookback_days = 14  # Increased from 7 to 14 days for better deduplication
     
     def _generate_content_fingerprint(self, content):
         """Generate a fingerprint for content to use in deduplication.
@@ -153,29 +153,21 @@ class ContentProcessor:
         # Open database session
         session = get_session(self.db_path)
         try:
-            # Get lookback date
-            lookback_date = datetime.now() - timedelta(days=self.cross_summary_lookback_days)
+            # Calculate date threshold for historical content
+            threshold_date = datetime.now() - timedelta(days=self.cross_summary_lookback_days)
             
-            # Get all content signatures from recent SENT summaries only
-            historical_signatures = session.query(SummarizedContent).join(
-                SummarizedContent.summary
-            ).filter(
-                SummarizedContent.date_summarized >= lookback_date,
-                SummarizedContent.summary.has(sent=True)  # Only from sent summaries
+            # Get all content fingerprints from recent summaries
+            historical_content = session.query(SummarizedContent).filter(
+                SummarizedContent.date_summarized >= threshold_date
             ).all()
             
-            logger.info(f"Found {len(historical_signatures)} historical content signatures for cross-summary deduplication")
+            logger.info(f"Found {len(historical_content)} historical content items from last {self.cross_summary_lookback_days} days")
             
-            # If no historical signatures, return all items
-            if not historical_signatures:
-                logger.info("No historical content found from sent summaries, using all items")
-                return items
-                
-            # Prepare historical data for comparison
-            historical_titles = [sig.content_title for sig in historical_signatures if sig.content_title]
-            historical_fingerprints = [sig.content_fingerprint for sig in historical_signatures if sig.content_fingerprint]
+            historical_fingerprints = [item.content_fingerprint for item in historical_content if item.content_fingerprint]
+            historical_titles = [item.content_title for item in historical_content if item.content_title]
+            historical_hashes = set([item.content_hash for item in historical_content if item.content_hash])
             
-            # Filter out items that are too similar to historical content
+            # Filter out content that has already been summarized
             filtered_items = []
             skipped_items = 0
             
@@ -185,9 +177,16 @@ class ContentProcessor:
                 if 'Fwd: ' in title:
                     title = title.split('Fwd: ', 1)[1]
                 
-                # Create content fingerprint
+                # Create content fingerprint and hash
                 content = item.get('content', '')
                 fingerprint = content[:1000] if content else ''  # Use first 1000 chars as fingerprint
+                content_hash = hashlib.md5((title + fingerprint[:100]).encode('utf-8')).hexdigest()
+                
+                # Check for exact hash match first (most reliable)
+                if content_hash in historical_hashes:
+                    logger.info(f"Skipping previously summarized content (exact hash match): {title}")
+                    skipped_items += 1
+                    continue
                 
                 # Check for title similarity with historical content
                 title_match = False
@@ -203,9 +202,10 @@ class ContentProcessor:
                         content_match = True
                         break
                 
-                # Only skip if BOTH title AND content are too similar to historical content
-                if title_match and content_match:
-                    logger.info(f"Skipping previously summarized content: {title}")
+                # Skip if EITHER title OR content are too similar to historical content
+                # This is more aggressive deduplication compared to the previous implementation
+                if (title_match and len(title) > 5) or content_match:
+                    logger.info(f"Skipping previously summarized content (similarity match): {title}")
                     skipped_items += 1
                     continue
                 
@@ -248,6 +248,11 @@ class ContentProcessor:
                 existing = session.query(SummarizedContent).filter_by(content_hash=content_hash).first()
                 if existing:
                     logger.debug(f"Content already tracked: {title}")
+                    # Update the existing record with the latest summary ID
+                    existing.summary_id = summary_id
+                    existing.date_summarized = datetime.now()
+                    session.add(existing)
+                    stored_count += 1
                     continue
                 
                 # Create signature record
@@ -261,6 +266,24 @@ class ContentProcessor:
                 
                 session.add(signature)
                 stored_count += 1
+                
+                # Store additional signatures for better deduplication
+                # Add a fingerprint based on just the first paragraph to catch similar content with slight modifications
+                if content and len(content) > 200:
+                    first_paragraph = content.split('\n\n')[0][:300]  # First paragraph, max 300 chars
+                    if len(first_paragraph) > 100:  # Only if it's substantial
+                        para_hash = hashlib.md5((title + first_paragraph).encode('utf-8')).hexdigest()
+                        # Check this variant doesn't already exist
+                        if not session.query(SummarizedContent).filter_by(content_hash=para_hash).first():
+                            para_signature = SummarizedContent(
+                                content_hash=para_hash,
+                                content_title=title,
+                                content_fingerprint=first_paragraph,
+                                summary_id=summary_id,
+                                date_summarized=datetime.now()
+                            )
+                            session.add(para_signature)
+                            stored_count += 1
             
             # Commit changes
             session.commit()

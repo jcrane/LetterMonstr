@@ -873,6 +873,88 @@ def process_single_email(session, email, fetcher):
                     'articles': []
                 }
                 
+                # Extract additional links from the email content if they exist
+                # This helps with getting article URLs from forwarded newsletters
+                if main_content and len(main_content) > 100:
+                    try:
+                        from bs4 import BeautifulSoup
+                        import re
+                        
+                        # Check if we have HTML content
+                        if '<a ' in main_content or '<A ' in main_content:
+                            # Parse the HTML to extract links
+                            soup = BeautifulSoup(main_content, 'html.parser')
+                            additional_links = []
+                            
+                            for a_tag in soup.find_all('a', href=True):
+                                href = a_tag['href']
+                                text = a_tag.get_text().strip()
+                                
+                                # Skip empty or javascript links
+                                if not href or href.startswith('javascript:') or href == '#':
+                                    continue
+                                    
+                                # Skip image links
+                                if href.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')):
+                                    continue
+                                
+                                # Skip tracking links
+                                skip_domains = ['beehiiv.com', 'mailchimp.com', 'substack.com', 'mail.', 'unsubscribe', 'preferences']
+                                if any(domain in href.lower() for domain in skip_domains):
+                                    continue
+                                
+                                # Use text or href as title
+                                title = text if text and len(text) > 1 else href
+                                
+                                # Ensure href is a full URL
+                                if href.startswith('http'):
+                                    additional_links.append({
+                                        'url': href,
+                                        'title': title,
+                                        'source': 'forwarded_content'
+                                    })
+                            
+                            # Add unique links to the existing links
+                            existing_urls = {link.get('url') for link in links}
+                            for link in additional_links:
+                                if link['url'] not in existing_urls:
+                                    links.append(link)
+                                    existing_urls.add(link['url'])
+                        
+                        # Also try to find URLs in the text content
+                        url_pattern = r'https?://[^\s<>"\']+|www\.[^\s<>"\']+'
+                        found_urls = re.findall(url_pattern, main_content)
+                        
+                        for url in found_urls:
+                            # Clean the URL
+                            url = url.rstrip('.,;:\'\"!?)')
+                            
+                            # Normalize the URL
+                            if url.startswith('www.'):
+                                url = 'http://' + url
+                                
+                            # Skip tracking links and image URLs
+                            skip_domains = ['beehiiv.com', 'mailchimp.com', 'substack.com', 'mail.', 'unsubscribe', 'preferences']
+                            if any(domain in url.lower() for domain in skip_domains):
+                                continue
+                                
+                            if url.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')):
+                                continue
+                                
+                            # Check if this URL is already in our links
+                            if url not in existing_urls:
+                                links.append({
+                                    'url': url,
+                                    'title': url,
+                                    'source': 'regex_extracted'
+                                })
+                                existing_urls.add(url)
+                    except Exception as e:
+                        logger.warning(f"Error extracting additional links from forwarded content: {e}")
+                
+                # Update processed_combined with possibly enhanced links
+                processed_combined['links'] = links
+                
                 # Update crawled articles
                 if crawled_content:
                     articles = []

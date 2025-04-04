@@ -107,6 +107,10 @@ class Summary(Base):
     sent = Column(Boolean, default=False)
     sent_date = Column(DateTime, nullable=True)
     is_forced = Column(Boolean, default=False)  # Indicates if this was a forced/on-demand summary
+    retry_count = Column(Integer, default=0)  # Number of retry attempts
+    last_retry_time = Column(DateTime, nullable=True)  # When the last retry was attempted
+    max_retries = Column(Integer, default=5)  # Maximum number of retry attempts
+    error_message = Column(Text, nullable=True)  # Store the most recent error message
 
 class ProcessedContent(Base):
     """Model for storing content that has been processed but not yet summarized."""

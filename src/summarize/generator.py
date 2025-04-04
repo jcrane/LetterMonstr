@@ -178,6 +178,7 @@ class SummaryGenerator:
             # Add source URLs if available - AFTER the content
             email_content = item.get('original_email', {})
             source_links = []
+            article_sources = []
             
             # Check if there's a web version link in the email
             if isinstance(email_content, dict) and 'links' in email_content:
@@ -217,15 +218,56 @@ class SummaryGenerator:
                         continue
                     
                 if article_url and article_title:
-                    source_links.append(f"ARTICLE: {article_title} - {article_url}")
+                    article_source = f"ARTICLE: {article_title} - {article_url}"
+                    source_links.append(article_source)
+                    article_sources.append({
+                        'title': article_title,
+                        'url': article_url
+                    })
+            
+            # Also check for any direct URLs in the content that might be useful
+            if isinstance(email_content, dict) and 'links' in email_content:
+                # Get all non-tracking links from the email
+                for link in email_content.get('links', []):
+                    url = link.get('url', '')
+                    title = link.get('title', '')
+                    
+                    # Skip tracking URLs
+                    if self._is_tracking_url(url):
+                        unwrapped_url = self._unwrap_tracking_url(url)
+                        if unwrapped_url:
+                            url = unwrapped_url
+                        else:
+                            continue
+                    
+                    # Don't add duplicates
+                    is_duplicate = False
+                    for existing in article_sources:
+                        if existing['url'] == url or existing['title'] == title:
+                            is_duplicate = True
+                            break
+                    
+                    if not is_duplicate and url and title and len(title) > 3:
+                        source_links.append(f"LINK: {title} - {url}")
+                        article_sources.append({
+                            'title': title,
+                            'url': url
+                        })
             
             # Add source links to the content
             if source_links:
                 item_text += "SOURCE LINKS:\n" + "\n".join(source_links) + "\n"
                 
                 # Also add a more explicit message about using these links for "Read more" links
-                item_text += "\nIMPORTANT: For the article summaries in this section, use the above URLs as 'Read more' links.\n"
-                item_text += "DO NOT use any tracking URLs that contain 'beehiiv', 'mailchimp', 'constantcontact', etc. Only use direct article URLs.\n"
+                item_text += "\nIMPORTANT LINK INSTRUCTIONS:\n"
+                item_text += "1. For the article summaries above, use ONLY the exact URLs listed above as 'Read more' links.\n"
+                item_text += "2. DO NOT invent or create placeholder URLs (like example.com).\n"
+                item_text += "3. Each 'Read more' link MUST use a real URL found in the SOURCE LINKS section.\n"
+                item_text += "4. If you can't find a matching URL for an article you summarized, DO NOT include a 'Read more' link for that article.\n"
+                item_text += "5. Format each link correctly as: <a href=\"EXACT_URL_FROM_ABOVE\">Read more →</a>\n"
+            else:
+                # If no links were found, add a note about this
+                item_text += "\nNOTE: No source links were found for this content. Do not create placeholder URLs in 'Read more' links.\n"
             
             # Add to formatted content
             formatted_content.append(item_text)
@@ -264,16 +306,18 @@ Follow these guidelines:
    - Use compact spacing - avoid excessive blank lines between sections
    - Use <hr> tags to separate major sections
 10. For EACH article or story from the newsletters, include a brief summary - don't skip any articles.
-11. IMPORTANT LINK FORMATTING: 
+11. IMPORTANT LINK FORMATTING - REQUIRES STRICT COMPLIANCE: 
    - After each summarized article or story, include a "Read more" link to the original article
    - Format each link as: <a href="ACTUAL_URL">Read more →</a>
-   - Use the article URLs from the SOURCE LINKS section at the end of each content block
-   - Each summarized item should have its own "Read more" link that points to its specific source
+   - Use ONLY actual URLs from the SOURCE LINKS section at the end of each content block
+   - NEVER invent placeholder URLs like "example.com" or "https://www.example.com/article-name"
+   - If you cannot find a real URL for a specific article, omit the "Read more" link entirely
+   - Each summarized item should have its own unique "Read more" link with its actual source URL
    - Place these links right after each article summary with minimal spacing
 12. If you find yourself omitting content due to length, create a separate "ADDITIONAL STORIES" section rather than leaving items out completely.
 
 The summary should be thorough and detailed, prioritizing completeness over brevity.
-Make sure all "Read more" links are properly formatted as HTML <a> tags so they're clickable in the email.
+Make sure all "Read more" links are properly formatted as HTML <a> tags so they're clickable in the email, and ONLY use real URLs from the source material.
 
 IMPORTANT: Format for proper HTML email display. DO include HTML formatting and ensure all links are properly formatted as <a href="url">link text</a>.
 """
@@ -336,15 +380,30 @@ IMPORTANT: Format for proper HTML email display. DO include HTML formatting and 
             
             # Update processed content records to mark them as summarized
             content_hashes = []
+            titles = []
             for item in processed_content:
                 # Create content hash for lookup
                 content = item.get('content', '')
                 title = item.get('source', '')
+                
+                # Store title for additional lookup
+                if title:
+                    titles.append(title)
+                
+                # Create and store multiple types of hashes for better matching
+                # 1. Main content hash
                 content_hash = hashlib.md5((title + content[:100]).encode('utf-8')).hexdigest()
                 content_hashes.append(content_hash)
+                
+                # 2. First paragraph hash (for articles where intros are similar)
+                if content and len(content) > 200:
+                    first_paragraph = content.split('\n\n')[0][:200]
+                    if len(first_paragraph) > 50:
+                        para_hash = hashlib.md5((title + first_paragraph).encode('utf-8')).hexdigest()
+                        content_hashes.append(para_hash)
             
-            # Update the processed content items
-            session.query(ProcessedContent).filter(
+            # Update the processed content items - first try by hash
+            updated_count = session.query(ProcessedContent).filter(
                 ProcessedContent.content_hash.in_(content_hashes)
             ).update(
                 {
@@ -354,9 +413,29 @@ IMPORTANT: Format for proper HTML email display. DO include HTML formatting and 
                 synchronize_session=False
             )
             
+            # Also try to match by title for any items we missed with hash
+            if titles:
+                for title in titles:
+                    # Skip very short titles to avoid false matches
+                    if not title or len(title) < 5:
+                        continue
+                        
+                    title_updated = session.query(ProcessedContent).filter(
+                        ProcessedContent.is_summarized == False,
+                        ProcessedContent.source.like(f"%{title}%")
+                    ).update(
+                        {
+                            'is_summarized': True,
+                            'summary_id': summary.id
+                        },
+                        synchronize_session=False
+                    )
+                    
+                    updated_count += title_updated
+            
             # Commit changes
             session.commit()
-            logger.info(f"Stored summary {summary.id} and marked {len(content_hashes)} content items as summarized")
+            logger.info(f"Stored summary {summary.id} and marked {updated_count} content items as summarized")
             
             return summary.id
             
