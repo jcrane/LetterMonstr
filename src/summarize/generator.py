@@ -82,6 +82,30 @@ class SummaryGenerator:
         
         for item in processed_content:
             content = item.get('content', '')
+            
+            # Handle case where content might be in other fields
+            if isinstance(content, str) and len(content) <= min_content_length:
+                # Try to find content in other fields
+                for field in ['raw_content', 'main_content', 'text', 'html']:
+                    if field in item and isinstance(item[field], str) and len(item[field]) > len(content):
+                        content = item[field]
+                        break
+            
+            # Also check content in nested structures
+            if 'original_email' in item and isinstance(item['original_email'], dict):
+                email_content = item['original_email'].get('content', '')
+                if isinstance(email_content, str) and len(email_content) > len(content):
+                    content = email_content
+            
+            # Check articles if present
+            for article in item.get('articles', []):
+                if isinstance(article, dict) and isinstance(article.get('content'), str):
+                    article_content = article.get('content', '')
+                    total_content_length += len(article_content)
+                    if len(article_content) > min_content_length:
+                        has_meaningful_content = True
+                        meaningful_items += 1
+            
             if isinstance(content, str) and len(content) > min_content_length:
                 has_meaningful_content = True
                 total_content_length += len(content)

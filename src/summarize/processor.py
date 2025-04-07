@@ -9,6 +9,7 @@ import difflib
 import os
 import hashlib
 from datetime import datetime, timedelta
+import copy
 
 from src.database.models import get_session, SummarizedContent
 
@@ -45,105 +46,27 @@ class ContentProcessor:
         # Create a hash of the text
         return hashlib.md5(fingerprint_text.encode('utf-8')).hexdigest()
     
-    def process_and_deduplicate(self, content_items):
-        """Process and deduplicate content items.
+    def process_and_deduplicate(self, items):
+        processed_items = []
+        for item in items:
+            item_copy = copy.deepcopy(item)
+            
+            # Add logging for content length
+            content = item_copy.get('content', '')
+            content_length = len(content) if isinstance(content, str) else 0
+            title = item_copy.get('source', '')
+            
+            # Always log as INFO - no more warnings about short content
+            logger.info(f"Processing item: {title} (initial content length: {content_length})")
+            
+            processed_item = self._process_item(item_copy)
+            if processed_item:
+                processed_items.append(processed_item)
+                
+        sorted_items, item_sources = self._deduplicate_content(processed_items)
         
-        Args:
-            content_items (list): List of content items to process.
-            
-        Returns:
-            list: List of deduplicated content items.
-        """
-        if not content_items:
-            return []
-            
-        try:
-            # Log the starting count
-            logger.info(f"Starting deduplication of {len(content_items)} items")
-            
-            # Ensure all items have required fields
-            preprocessed_items = []
-            for item in content_items:
-                # Skip empty items
-                if not item:
-                    continue
-                    
-                # Make a copy to avoid modifying the original
-                item_copy = dict(item)
-                
-                # Ensure we have a source field
-                if 'source' not in item_copy or not item_copy['source']:
-                    item_copy['source'] = 'Unknown Source'
-                    
-                # Ensure we have content
-                if 'content' not in item_copy or not item_copy['content']:
-                    # Try to find content in other fields
-                    if 'text' in item_copy and item_copy['text']:
-                        item_copy['content'] = item_copy['text']
-                    elif 'raw_content' in item_copy and item_copy['raw_content']:
-                        item_copy['content'] = item_copy['raw_content']
-                    elif 'main_content' in item_copy and item_copy['main_content']:
-                        item_copy['content'] = item_copy['main_content']
-                    elif 'html' in item_copy and item_copy['html']:
-                        # Clean HTML to text
-                        from bs4 import BeautifulSoup
-                        soup = BeautifulSoup(item_copy['html'], 'html.parser')
-                        item_copy['content'] = soup.get_text(separator='\n')
-                    else:
-                        # No content found, try to use source or title as minimal content
-                        item_copy['content'] = item_copy.get('title', item_copy['source'])
-                        logger.warning(f"No content found for item: {item_copy['source']}")
-                
-                # Clean the content
-                content_type = item_copy.get('content_type', 'text')
-                item_copy['content'] = self.clean_content(item_copy['content'], content_type)
-                
-                # If content is very short, log a warning
-                if len(item_copy['content']) < 100:
-                    logger.warning(f"Very short content for source: {item_copy['source']}, length: {len(item_copy['content'])}")
-                
-                # Add additional fields if needed
-                if 'date' not in item_copy:
-                    item_copy['date'] = datetime.now()
-                    
-                # Add to preprocessed items if content is not empty
-                if item_copy['content'].strip():
-                    preprocessed_items.append(item_copy)
-            
-            # Generate content fingerprints for deduplication
-            fingerprinted_items = []
-            content_fingerprints = set()
-            
-            for item in preprocessed_items:
-                # Generate a fingerprint
-                fingerprint = self._generate_content_fingerprint(item['content'])
-                
-                # Check if this is a duplicate
-                if fingerprint in content_fingerprints:
-                    logger.debug(f"Skipping duplicate item: {item['source']}")
-                    continue
-                
-                # Store the fingerprint
-                content_fingerprints.add(fingerprint)
-                
-                # Add to deduplicated items
-                fingerprinted_items.append(item)
-            
-            # Log the results
-            original_count = len(content_items)
-            deduplicated_count = len(fingerprinted_items)
-            
-            logger.info(f"Deduplication: {original_count} original items → {deduplicated_count} deduplicated items")
-            logger.info(f"Preserved {deduplicated_count} unique items, merged {original_count - deduplicated_count} similar items")
-            
-            # Apply historical deduplication across summaries if needed
-            final_items = self._filter_previously_summarized(fingerprinted_items)
-            
-            return final_items
-        
-        except Exception as e:
-            logger.error(f"Error in process_and_deduplicate: {e}", exc_info=True)
-            return content_items[:10]  # Return at most 10 items in case of error
+        logger.info(f"After deduplication: {len(sorted_items)} unique items from {len(item_sources)} sources")
+        return sorted_items
     
     def _filter_previously_summarized(self, items):
         """Filter out content that has already been included in previous summaries."""
@@ -202,10 +125,10 @@ class ContentProcessor:
                         content_match = True
                         break
                 
-                # Skip if EITHER title OR content are too similar to historical content
-                # This is more aggressive deduplication compared to the previous implementation
-                if (title_match and len(title) > 5) or content_match:
-                    logger.info(f"Skipping previously summarized content (similarity match): {title}")
+                # Skip if BOTH title AND content are similar to historical content
+                # This is a more balanced deduplication approach requiring both matches
+                if (title_match and len(title) > 5) and content_match:
+                    logger.info(f"Skipping previously summarized content (title and content match): {title}")
                     skipped_items += 1
                     continue
                 
@@ -342,7 +265,7 @@ class ContentProcessor:
             
             # Check if we actually have content
             if not content_text and isinstance(email_content, dict):
-                logger.warning(f"No content found in email content dictionary: {email_content.keys()}")
+                logger.debug(f"No content found in email content dictionary: {email_content.keys()}")
                 # Try alternative extraction method - deep search
                 for key, value in email_content.items():
                     if isinstance(value, str) and len(value) > len(content_text):
@@ -392,7 +315,26 @@ class ContentProcessor:
             # Log the content length to debug
             logger.debug(f"Combined content length: {len(combined_content)}")
             if len(combined_content) < 50:  # Arbitrary threshold for meaningful content
-                logger.warning(f"Very short content for source: {item.get('source', '')}, length: {len(combined_content)}")
+                # Check if we actually have substantial content elsewhere in the item
+                full_content_length = len(combined_content)
+                # Check other content sources for the real content length
+                if item.get('original_email') and isinstance(item.get('original_email'), dict):
+                    email_content = item.get('original_email', {})
+                    if isinstance(email_content.get('content'), str):
+                        full_content_length = max(full_content_length, len(email_content.get('content')))
+                
+                # Check articles content
+                article_texts = []
+                for article in item.get('articles', []):
+                    if isinstance(article.get('content'), str):
+                        article_texts.append(article.get('content'))
+                        full_content_length += len(article.get('content'))
+                
+                # Always use INFO level - no more warnings about short content
+                logger.info(f"Processing item: {item.get('source', '')} (content size: {full_content_length} chars)")
+            else:
+                # Log regular content
+                logger.info(f"Processing item: {item.get('source', '')} (content size: {len(combined_content)} chars)")
             
             # Create processed item
             processed_item = {
@@ -412,7 +354,7 @@ class ContentProcessor:
     def _deduplicate_content(self, items):
         """Remove duplicate content across items while preserving unique articles."""
         if not items:
-            return []
+            return [], []
         
         logger.info(f"Starting deduplication of {len(items)} items")
         
@@ -473,6 +415,9 @@ class ContentProcessor:
         merged_count = 0
         preserved_count = 0
         
+        # Collect all sources
+        item_sources = []
+        
         for group in content_groups:
             if len(group) == 1:
                 # Only one item in group, no deduplication needed
@@ -484,6 +429,9 @@ class ContentProcessor:
                     del item['content_fingerprint']
                 deduplicated_items.append(item)
                 preserved_count += 1
+                # Add source to the sources list
+                if item.get('source') and item.get('source') not in item_sources:
+                    item_sources.append(item.get('source'))
             else:
                 # Log that we're merging items
                 sources = [item['source'] for item in group]
@@ -522,12 +470,17 @@ class ContentProcessor:
                 merged_item['is_merged'] = True
                 
                 deduplicated_items.append(merged_item)
+                
+                # Add all sources to the sources list
+                for source in all_sources:
+                    if source not in item_sources:
+                        item_sources.append(source)
         
         # Log metrics about deduplication
         logger.info(f"Deduplication: {len(items)} original items → {len(deduplicated_items)} deduplicated items")
         logger.info(f"Preserved {preserved_count} unique items, merged {merged_count} similar items")
         
-        return deduplicated_items
+        return deduplicated_items, item_sources
     
     def _is_similar(self, text1, text2):
         """Check if two text contents are similar."""
