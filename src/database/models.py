@@ -133,6 +133,34 @@ class ProcessedContent(Base):
     # Relationships
     summary = relationship("Summary", foreign_keys=[summary_id])
     
+    def get_processed_content(self):
+        """Retrieve the processed content, handling JSON serialization safely.
+        
+        Returns:
+            dict or str: The processed content, properly deserialized if stored as JSON
+        """
+        if not self.processed_content:
+            return {}
+            
+        # Try to deserialize JSON, but handle raw strings gracefully
+        try:
+            # First check if it's already a dict structure serialized to JSON
+            content_data = json.loads(self.processed_content)
+            
+            # Handle the special case of our direct content structure
+            if isinstance(content_data, dict) and 'content' in content_data and 'original_length' in content_data:
+                # This is our direct content structure
+                logger.info(f"Found direct content structure with {content_data.get('original_length', 0)} original chars")
+                # Return the content field directly if it's substantial
+                if len(content_data['content']) > 1000:
+                    return content_data['content']
+            
+            return content_data
+        except (json.JSONDecodeError, TypeError):
+            # Not JSON, return the raw content
+            logger.info(f"Returning raw content string: {len(self.processed_content)} chars")
+            return self.processed_content
+    
     def __repr__(self):
         return f"<ProcessedContent(id={self.id}, source='{self.source}', is_summarized={self.is_summarized})>"
 

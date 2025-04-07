@@ -51,10 +51,49 @@ class EmailParser:
                 
             subject = email_data.get('subject', '')
             
-            # Initialize content fields
-            email_data['content'] = None
-            email_data['html_content'] = None
-            email_data['text_content'] = None
+            # CRITICAL FIX: Check if we already have content in a proper dictionary structure
+            # and preserve it instead of transforming it
+            if 'content' in email_data and isinstance(email_data['content'], dict):
+                content_dict = email_data['content']
+                
+                # Check if it has HTML/text content we should preserve
+                html_content = content_dict.get('html', '')
+                text_content = content_dict.get('text', '')
+                
+                # Check if we have substantial HTML or text content directly from the fetcher
+                html_len = len(html_content) if isinstance(html_content, str) else 0
+                text_len = len(text_content) if isinstance(text_content, str) else 0
+                
+                if (html_len > 1000 or text_len > 1000):
+                    logger.info(f"Preserving original content dictionary with HTML={html_len} chars, TEXT={text_len} chars")
+                    
+                    # Extract links from the content
+                    content_type = 'html' if html_len > text_len else 'text'
+                    content_to_extract = html_content if content_type == 'html' else text_content
+                    
+                    # Extract links but preserve original content structure
+                    links = self.extract_links(content_to_extract, content_type)
+                    content_dict['links'] = links
+                    
+                    # Store the content type
+                    email_data['content_type'] = content_type
+                    
+                    # Also store HTML and text content in appropriate fields for compatibility
+                    if html_content:
+                        email_data['html_content'] = html_content
+                    if text_content:
+                        email_data['text_content'] = text_content
+                    
+                    # Return the modified email_data with preserved content
+                    return email_data
+            
+            # Initialize content fields if not already set
+            if 'html_content' not in email_data:
+                email_data['html_content'] = None
+            if 'text_content' not in email_data:
+                email_data['text_content'] = None
+            if 'content' not in email_data or not email_data['content']:
+                email_data['content'] = {}
             
             # Check if this is a forwarded email
             is_forwarded = False

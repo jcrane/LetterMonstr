@@ -67,10 +67,65 @@ def json_serialize(obj):
             return str(obj)
     
     try:
-        return json.dumps(obj, default=default_serializer)
-    except:
+        # For string content, don't convert to JSON, just pass through directly
+        if isinstance(obj, str):
+            return obj
+            
+        # For dict content that might contain large strings, process specially
+        elif isinstance(obj, dict):
+            # Check if it contains large HTML or text content that should be preserved as is
+            if ('html' in obj and isinstance(obj['html'], str) and len(obj['html']) > 10000) or \
+               ('text' in obj and isinstance(obj['text'], str) and len(obj['text']) > 10000) or \
+               ('content' in obj and isinstance(obj['content'], str) and len(obj['content']) > 10000):
+                
+                # For large email content, convert to a single string representation
+                logger.info(f"Converting large email content to direct string storage")
+                
+                # Use HTML content if available as it contains more information
+                if 'html' in obj and isinstance(obj['html'], str) and len(obj['html']) > 10000:
+                    return obj['html']
+                elif 'content' in obj and isinstance(obj['content'], str) and len(obj['content']) > 10000:
+                    return obj['content']
+                elif 'text' in obj and isinstance(obj['text'], str) and len(obj['text']) > 10000:
+                    return obj['text']
+            
+            # Create a new dict with potential large string values intact
+            processed_dict = {}
+            for key, value in obj.items():
+                if isinstance(value, str) and len(value) > 10000:
+                    # For large string values, preserve them exactly as is
+                    processed_dict[key] = value
+                elif isinstance(value, dict):
+                    # Recursively handle nested dictionaries
+                    processed_dict[key] = json_serialize(value)
+                else:
+                    processed_dict[key] = value
+            
+            # Now serialize the processed dict
+            try:
+                return json.dumps(processed_dict, default=default_serializer)
+            except TypeError as e:
+                logger.warning(f"Error serializing dict with large values: {e}")
+                # Fall back to a simpler serialization
+                simple_dict = {k: str(v) if not isinstance(v, (int, float, bool, str, type(None))) else v 
+                              for k, v in processed_dict.items()}
+                return json.dumps(simple_dict)
+        else:
+            return json.dumps(obj, default=default_serializer)
+    except Exception as e:
+        logger.error(f"Error in JSON serialization: {e}", exc_info=True)
         # Last resort: convert the entire object to a string
-        return json.dumps(str(obj))
+        if isinstance(obj, dict):
+            # For dicts, try to preserve large string fields
+            result = {}
+            for k, v in obj.items():
+                if isinstance(v, str):
+                    result[k] = v[:1000000]  # Preserve string content with reasonable limit
+                else:
+                    result[k] = str(v)
+            return json.dumps(result)
+        else:
+            return json.dumps(str(obj))
 
 class PeriodicFetcher:
     """Handles periodic fetching and processing of emails."""
@@ -260,25 +315,45 @@ class PeriodicFetcher:
             # Process link content (this will extract content from the links)
             self._extract_link_content(email_id, content_type, content, links, session)
             
-            # Extract processed content entries for deduplication and future summarization
-            content_source = {
-                'type': content_type,
-                'content': content,
-                'is_full_email': True,
-                'links': links
-            }
-            
-            # Process the content source
-            processed_content_entry = self._process_content_source(
-                session, 
-                content_source['content'],
-                content_source['type'],
-                email_id,
-                email['subject'],
-                email.get('date'),
-                is_forwarded,
-                parsed_content  # Pass the full parsed content
-            )
+            # CRITICAL FIX: Check if the original content from email is a dict with HTML/text
+            # and pass it directly to preserve the large content
+            if isinstance(content, dict) and ('html' in content or 'text' in content):
+                # This means we have a structured content dict with HTML or text
+                html_len = len(content.get('html', '')) if isinstance(content.get('html', ''), str) else 0
+                text_len = len(content.get('text', '')) if isinstance(content.get('text', ''), str) else 0
+                logger.info(f"Passing structured content directly: HTML={html_len} chars, TEXT={text_len} chars")
+                
+                # Process the content source - passing the FULL content dictionary
+                processed_content_entry = self._process_content_source(
+                    session, 
+                    content,  # Pass the full dict with HTML/text directly
+                    content_type,
+                    email_id,
+                    email['subject'],
+                    email.get('date'),
+                    is_forwarded,
+                    parsed_content
+                )
+            else:
+                # Create a content source structure
+                content_source = {
+                    'type': content_type,
+                    'content': content,
+                    'is_full_email': True,
+                    'links': links
+                }
+                
+                # Process the content source
+                processed_content_entry = self._process_content_source(
+                    session, 
+                    content_source['content'],
+                    content_source['type'],
+                    email_id,
+                    email['subject'],
+                    email.get('date'),
+                    is_forwarded,
+                    parsed_content
+                )
             
             if not processed_content_entry:
                 logger.warning(f"Failed to create processed content entry for email: {email['subject']}")
@@ -511,6 +586,87 @@ class PeriodicFetcher:
             # Sanitize the email data to ensure it can be serialized
             sanitized_email_data = self._sanitize_for_json(email_data) if email_data else None
             
+            # Extract the best content directly
+            best_content = None
+            best_content_type = None
+            best_content_length = 0
+            
+            # For email content from fetcher, extract HTML or text directly
+            if isinstance(content, dict):
+                if 'html' in content and isinstance(content['html'], str) and len(content['html']) > 1000:
+                    best_content = content['html']
+                    best_content_type = 'html'
+                    best_content_length = len(best_content)
+                    logger.info(f"Found HTML content: {best_content_length} chars")
+                
+                if 'text' in content and isinstance(content['text'], str) and len(content['text']) > best_content_length:
+                    best_content = content['text']
+                    best_content_type = 'text'
+                    best_content_length = len(best_content)
+                    logger.info(f"Found text content: {best_content_length} chars")
+            
+            # If we have substantial content, store it directly
+            if best_content and best_content_length > 5000:
+                logger.info(f"Storing raw {best_content_type} content directly for {subject}: {best_content_length} chars")
+                
+                # Extract clean text from HTML if needed
+                clean_content = best_content
+                if best_content_type == 'html' and best_content_length > 10000:
+                    try:
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(best_content, 'html.parser')
+                        text_content = soup.get_text(separator='\n', strip=True)
+                        
+                        if len(text_content) > 1000:
+                            clean_content = text_content
+                            logger.info(f"Extracted clean text from HTML: {len(clean_content)} chars")
+                    except Exception as e:
+                        logger.warning(f"Failed to extract text from HTML: {e}")
+                
+                # Generate content hash for deduplication
+                content_hash = hashlib.md5(f"{subject}_{datetime.now().isoformat()}".encode('utf-8')).hexdigest()
+                
+                # Create a JSON structure with all the content variants
+                content_structure = {
+                    'source': subject,
+                    'date': date.isoformat() if isinstance(date, datetime) else date,
+                    'content': clean_content,
+                    'content_type': content_type,
+                    'is_forwarded': is_forwarded,
+                    'original_length': best_content_length,
+                    'original_content_type': best_content_type
+                }
+                
+                # Add HTML or text if available
+                if isinstance(content, dict):
+                    if 'html' in content and content['html']:
+                        content_structure['html'] = content['html']
+                    if 'text' in content and content['text']:
+                        content_structure['text'] = content['text']
+                
+                # Store the full structure as serialized JSON
+                serialized_content = json.dumps(content_structure)
+                
+                # Create ProcessedContent entry
+                processed_content = ProcessedContent(
+                    content_hash=content_hash,
+                    email_id=email_id,
+                    source=subject,
+                    content_type=content_type,
+                    processed_content=serialized_content,
+                    date_processed=datetime.now(),
+                    is_summarized=False
+                )
+                
+                session.add(processed_content)
+                session.flush()  # Get ID without committing
+                
+                logger.info(f"Created ProcessedContent entry with direct content, ID: {processed_content.id}")
+                return processed_content
+            
+            # If no large content found, use the content processor normally
+            logger.info(f"No large content found, using content processor for: {subject}")
+            
             # Create content item for processing
             content_item = {
                 'source': subject,
@@ -550,7 +706,7 @@ class PeriodicFetcher:
             if content_type == 'article':
                 content_item['crawled_content'] = [content]
             
-            # Process the content item
+            # Process through the normal pipeline
             processed_items = self.content_processor.process_and_deduplicate([content_item])
             
             if not processed_items:
@@ -568,13 +724,16 @@ class PeriodicFetcher:
                 logger.info(f"Content already exists with hash: {content_hash}")
                 return existing
             
+            # Get the serialized content, which might now be just HTML for large emails
+            serialized_content = json_serialize(processed_item)
+            
             # Create ProcessedContent entry
             processed_content = ProcessedContent(
                 content_hash=content_hash,
                 email_id=email_id,
                 source=subject,
                 content_type=content_type,
-                processed_content=json_serialize(processed_item),
+                processed_content=serialized_content,
                 date_processed=datetime.now(),
                 is_summarized=False
             )
