@@ -221,135 +221,132 @@ class ContentProcessor:
     def _process_item(self, item):
         """Process a single content item."""
         try:
-            # Extract main content
-            email_content = item.get('email_content', {})
+            # Get title for logging
+            title = item.get('source', 'Unknown')
+            
+            # Log initial content length for debugging
+            initial_content_length = len(item.get('content', '')) if isinstance(item.get('content', ''), str) else 0
+            logger.info(f"Processing item: {title} (initial content length: {initial_content_length})")
+            
+            # Different content structures to check
+            original_email = item.get('original_email', {})
             crawled_content = item.get('crawled_content', [])
+            articles = item.get('articles', [])
             
-            # Log the structure of email_content for debugging
-            logger.debug(f"Email content keys: {email_content.keys() if isinstance(email_content, dict) else 'not a dict'}")
+            # Initialize combined content
+            content_parts = []
             
-            # Get text content from email
-            content_text = ''
-            if isinstance(email_content, dict):
-                # Try to extract content from the dictionary
-                if email_content.get('content'):
-                    # Direct content field
-                    content_text = email_content.get('content', '')
-                    logger.debug(f"Using direct content field, length: {len(content_text)}")
-                    
-                elif email_content.get('content_type') == 'html':
-                    # HTML content - extract and clean
-                    html_content = email_content.get('content', '')
-                    logger.debug(f"Processing HTML content, length: {len(html_content)}")
-                    
-                    if html_content:
-                        # Use BeautifulSoup to extract text from HTML
-                        try:
-                            from bs4 import BeautifulSoup
-                            soup = BeautifulSoup(html_content, 'html.parser')
-                            # Remove script and style elements
-                            for script in soup(["script", "style"]):
-                                script.extract()
-                            # Get text
-                            content_text = soup.get_text(separator='\n')
-                            # Clean up whitespace
-                            content_text = '\n'.join(line.strip() for line in content_text.splitlines() if line.strip())
-                            logger.debug(f"Extracted text from HTML, length: {len(content_text)}")
-                        except Exception as e:
-                            logger.error(f"Error extracting text from HTML: {e}")
-                            content_text = html_content  # Use raw HTML if extraction fails
-                else:
-                    # Plain text content
-                    content_text = email_content.get('content', '')
-                    logger.debug(f"Using plain text content, length: {len(content_text)}")
-            
-            # Check if we actually have content
-            if not content_text and isinstance(email_content, dict):
-                logger.debug(f"No content found in email content dictionary: {email_content.keys()}")
-                # Try alternative extraction method - deep search
-                for key, value in email_content.items():
-                    if isinstance(value, str) and len(value) > len(content_text):
-                        content_text = value
-                        logger.debug(f"Found larger content in key '{key}', length: {len(content_text)}")
+            # Check direct content first 
+            direct_content = item.get('content', '')
+            if isinstance(direct_content, str) and len(direct_content) > 0:
+                # Add to our content collection
+                content_parts.append(direct_content)
+                logger.debug(f"Added direct content: {len(direct_content)} chars")
                 
-                # If still no content, try any dict values recursively
-                if not content_text:
-                    def search_nested_dict(d, depth=0):
-                        if depth > 3:  # Limit recursion depth
-                            return None
-                            
-                        best_text = ''
-                        if isinstance(d, dict):
-                            for k, v in d.items():
-                                if isinstance(v, str) and len(v) > len(best_text):
-                                    best_text = v
-                                elif isinstance(v, (dict, list)):
-                                    nested_text = search_nested_dict(v, depth+1)
-                                    if nested_text and len(nested_text) > len(best_text):
-                                        best_text = nested_text
-                        elif isinstance(d, list):
-                            for item in d:
-                                nested_text = search_nested_dict(item, depth+1)
-                                if nested_text and len(nested_text) > len(best_text):
-                                    best_text = nested_text
-                        return best_text
-                    
-                    deep_content = search_nested_dict(email_content)
-                    if deep_content and len(deep_content) > len(content_text):
-                        content_text = deep_content
-                        logger.debug(f"Found content through deep search, length: {len(content_text)}")
+            # Check for HTML content
+            html_content = item.get('html', '')
+            if isinstance(html_content, str) and len(html_content) > 0:
+                # Extract text from HTML
+                try:
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    # Remove script and style elements
+                    for script in soup(["script", "style"]):
+                        script.extract()
+                    # Get text
+                    html_text = soup.get_text(separator='\n')
+                    # Clean up whitespace
+                    html_text = '\n'.join(line.strip() for line in html_text.splitlines() if line.strip())
+                    if len(html_text) > 0:
+                        content_parts.append(html_text)
+                        logger.debug(f"Added extracted HTML text: {len(html_text)} chars")
+                except Exception as e:
+                    logger.error(f"Error extracting text from HTML: {e}")
+                    # Use raw HTML as fallback
+                    content_parts.append(html_content)
+                    logger.debug(f"Added raw HTML as fallback: {len(html_content)} chars")
             
-            # Combine with crawled content
-            all_content = content_text
+            # Check for plain text content
+            text_content = item.get('text', '')
+            if isinstance(text_content, str) and len(text_content) > 0:
+                content_parts.append(text_content)
+                logger.debug(f"Added text content: {len(text_content)} chars")
             
-            # Add crawled content if available
-            article_contents = []
-            for article in crawled_content:
-                if not article.get('is_ad', False):
-                    article_text = f"\n\nARTICLE: {article.get('title', '')}\n{article.get('content', '')}"
-                    article_contents.append(article_text)
-            
-            # Combine email content with crawled content
-            combined_content = content_text + "\n\n" + "\n\n".join(article_contents)
-            
-            # Log the content length to debug
-            logger.debug(f"Combined content length: {len(combined_content)}")
-            if len(combined_content) < 50:  # Arbitrary threshold for meaningful content
-                # Check if we actually have substantial content elsewhere in the item
-                full_content_length = len(combined_content)
-                # Check other content sources for the real content length
-                if item.get('original_email') and isinstance(item.get('original_email'), dict):
-                    email_content = item.get('original_email', {})
-                    if isinstance(email_content.get('content'), str):
-                        full_content_length = max(full_content_length, len(email_content.get('content')))
+            # Check for content in original_email if it exists
+            if isinstance(original_email, dict):
+                # Try content from original email
+                email_content = original_email.get('content', '')
+                if isinstance(email_content, str) and len(email_content) > 0:
+                    content_parts.append(email_content)
+                    logger.debug(f"Added original email content: {len(email_content)} chars")
                 
-                # Check articles content
-                article_texts = []
-                for article in item.get('articles', []):
-                    if isinstance(article.get('content'), str):
-                        article_texts.append(article.get('content'))
-                        full_content_length += len(article.get('content'))
+                # Also check HTML and text in original email
+                email_html = original_email.get('html', '')
+                if isinstance(email_html, str) and len(email_html) > 0:
+                    try:
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(email_html, 'html.parser')
+                        for script in soup(["script", "style"]):
+                            script.extract()
+                        email_html_text = soup.get_text(separator='\n')
+                        email_html_text = '\n'.join(line.strip() for line in email_html_text.splitlines() if line.strip())
+                        if len(email_html_text) > 0:
+                            content_parts.append(email_html_text)
+                            logger.debug(f"Added extracted original email HTML: {len(email_html_text)} chars")
+                    except Exception as e:
+                        logger.error(f"Error extracting text from original email HTML: {e}")
                 
-                # Always use INFO level - no more warnings about short content
-                logger.info(f"Processing item: {item.get('source', '')} (content size: {full_content_length} chars)")
-            else:
-                # Log regular content
-                logger.info(f"Processing item: {item.get('source', '')} (content size: {len(combined_content)} chars)")
+                email_text = original_email.get('text', '')
+                if isinstance(email_text, str) and len(email_text) > 0:
+                    content_parts.append(email_text)
+                    logger.debug(f"Added original email text: {len(email_text)} chars")
             
-            # Create processed item
-            processed_item = {
-                'source': item.get('source', ''),
-                'date': item.get('date', datetime.now()),
-                'content': combined_content,
-                'original_email': email_content,
-                'articles': crawled_content
-            }
+            # Add content from any articles
+            for article in articles:
+                if isinstance(article, dict) and isinstance(article.get('content'), str):
+                    article_content = article.get('content', '')
+                    if len(article_content) > 0:
+                        content_parts.append(f"ARTICLE: {article.get('title', '')}\n{article_content}")
+                        logger.debug(f"Added article content: {len(article_content)} chars")
             
-            return processed_item
+            # Add content from crawled content
+            for crawled in crawled_content:
+                if isinstance(crawled, dict) and isinstance(crawled.get('content'), str):
+                    crawled_text = crawled.get('content', '')
+                    if len(crawled_text) > 0:
+                        content_parts.append(f"CRAWLED: {crawled.get('title', '')}\n{crawled_text}")
+                        logger.debug(f"Added crawled content: {len(crawled_text)} chars")
             
+            # Combine all content parts
+            combined_content = "\n\n".join(content_parts)
+            
+            # Clean the combined content
+            clean_content = self.clean_content(combined_content)
+            
+            # Calculate total content length
+            total_content_length = len(clean_content)
+            
+            # If the content is empty after cleaning, try to use any raw content
+            if total_content_length < 100:
+                logger.warning(f"Content for {title} is very short after cleaning: {total_content_length} chars")
+                for key in ['raw_content', 'raw_email', 'raw_message']:
+                    if key in item and isinstance(item[key], str) and len(item[key]) > total_content_length:
+                        logger.info(f"Using {key} as fallback content: {len(item[key])} chars")
+                        clean_content = item[key]
+                        total_content_length = len(clean_content)
+                        break
+            
+            # Log the final processed item size
+            logger.info(f"Processing item: {title} (content size: {total_content_length} chars)")
+            
+            # Update the content in the item
+            item['content'] = clean_content
+            
+            return item
         except Exception as e:
             logger.error(f"Error processing item: {e}", exc_info=True)
-            return None
+            # Return the original item if there was an error
+            return item
     
     def _deduplicate_content(self, items):
         """Remove duplicate content across items while preserving unique articles."""

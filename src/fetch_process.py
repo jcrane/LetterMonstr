@@ -517,12 +517,34 @@ class PeriodicFetcher:
                 'date': date,
                 'content_type': content_type,
                 'is_forwarded': is_forwarded,
-                'email_content': sanitized_email_data
+                'original_email': sanitized_email_data
             }
             
             # For email content, set the content directly
-            if content_type in ['html', 'text'] and content:
+            # If content is a dict (from email_module.fetcher), keep both html and text
+            if isinstance(content, dict):
+                if 'html' in content and content['html']:
+                    content_item['content'] = content['html']
+                    content_item['html'] = content['html']
+                    logger.info(f"Using HTML content from email: {len(content['html'])} chars")
+                elif 'text' in content and content['text']:
+                    content_item['content'] = content['text']
+                    content_item['text'] = content['text']
+                    logger.info(f"Using text content from email: {len(content['text'])} chars")
+                
+                # Store all content variants for later use
+                for key, value in content.items():
+                    if key not in ['attachments'] and isinstance(value, str) and len(value) > 0:
+                        content_item[key] = value
+            else:
+                # Simple string content
                 content_item['content'] = content
+            
+            # Additional logging to trace content length
+            content_length = 0
+            if isinstance(content_item.get('content'), str):
+                content_length = len(content_item['content'])
+            logger.info(f"Content item for {subject} has content length: {content_length} chars")
             
             # For crawled content, structure differently
             if content_type == 'article':

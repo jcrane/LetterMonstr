@@ -488,10 +488,10 @@ def generate_and_send_summary(force=False):
                         # Content is small enough to summarize in one call
                         logger.info("Content size is within limits, generating summary in one call...")
                         summary_text = summary_generator.generate_summary(final_content)
-                        
-                        if not summary_text:
-                            raise Exception("Failed to generate summary - empty result returned")
-                
+                    
+                    if not summary_text:
+                        raise Exception("Failed to generate summary - empty result returned")
+                    
                 except Exception as e:
                     # Create a new summary record with the error, but don't mark content as summarized
                     error_message = f"Error generating summary: {str(e)}"
@@ -690,7 +690,7 @@ def main():
     if force:
         logger.info("Force flag detected, generating summary immediately")
         generate_and_send_summary(force=True)
-    
+        
     # Use the setup_scheduler function to handle all scheduling
     setup_scheduler()
 

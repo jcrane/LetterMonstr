@@ -209,49 +209,137 @@ class EmailFetcher:
         content = {
             'text': '',
             'html': '',
-            'attachments': []
+            'attachments': [],
+            'raw_email': str(msg)  # Store the entire raw message to ensure we have everything
         }
         
-        if msg.is_multipart():
-            # Iterate through email parts
-            for part in msg.walk():
-                content_type = part.get_content_type()
-                content_disposition = str(part.get("Content-Disposition", ""))
-                
-                try:
-                    # Get the content
-                    body = part.get_payload(decode=True)
-                    
-                    if body:
-                        # Handle text parts
-                        if content_type == "text/plain" and "attachment" not in content_disposition:
-                            content['text'] += body.decode('utf-8', errors='replace')
-                        
-                        # Handle HTML parts
-                        elif content_type == "text/html" and "attachment" not in content_disposition:
-                            content['html'] += body.decode('utf-8', errors='replace')
-                        
-                        # Handle attachments
-                        elif "attachment" in content_disposition:
-                            filename = part.get_filename()
-                            if filename:
-                                content['attachments'].append({
-                                    'filename': filename,
-                                    'content_type': content_type,
-                                    'data': body
-                                })
-                except Exception as e:
-                    logger.error(f"Error processing email part: {e}", exc_info=True)
-        else:
-            # Handle non-multipart messages
-            content_type = msg.get_content_type()
-            body = msg.get_payload(decode=True)
+        # The best HTML and text parts we've found
+        best_html = ""
+        best_text = ""
+        
+        def process_part(part, level=0):
+            """Recursively process message parts for thorough content extraction."""
+            nonlocal best_html, best_text
             
-            if body:
-                if content_type == "text/plain":
-                    content['text'] = body.decode('utf-8', errors='replace')
-                elif content_type == "text/html":
-                    content['html'] = body.decode('utf-8', errors='replace')
+            content_type = part.get_content_type()
+            content_disposition = str(part.get("Content-Disposition", ""))
+            
+            # Skip attachments in the main content extraction
+            if "attachment" in content_disposition:
+                try:
+                    filename = part.get_filename()
+                    if filename:
+                        # Get the payload
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            # Store attachment info for later use
+                            content['attachments'].append({
+                                'filename': filename,
+                                'content_type': content_type,
+                                'data': str(payload)[:100] + "..." if len(str(payload)) > 100 else str(payload)  # Limited preview
+                            })
+                except Exception as e:
+                    logger.error(f"Error processing attachment: {e}")
+                return
+            
+            # Extract body content
+            try:
+                # Check for multipart
+                if part.is_multipart():
+                    # Process each subpart
+                    for subpart in part.get_payload():
+                        process_part(subpart, level + 1)
+                else:
+                    # Extract and decode the content
+                    payload = part.get_payload(decode=True)
+                    
+                    if payload:
+                        try:
+                            # Handle text content
+                            if content_type == "text/plain":
+                                text_content = payload.decode("utf-8", errors="replace")
+                                if len(text_content) > len(best_text):
+                                    best_text = text_content
+                            
+                            # Handle HTML content
+                            elif content_type == "text/html":
+                                html_content = payload.decode("utf-8", errors="replace")
+                                if len(html_content) > len(best_html):
+                                    best_html = html_content
+                            
+                            # Handle other content types
+                            else:
+                                logger.debug(f"Found other content type: {content_type}")
+                                
+                        except Exception as e:
+                            logger.error(f"Error decoding content: {e}")
+                            # Try to decode with different encodings as fallback
+                            try:
+                                if content_type.startswith("text/"):
+                                    for encoding in ['latin-1', 'ascii', 'cp1252']:
+                                        try:
+                                            decoded = payload.decode(encoding, errors="replace")
+                                            if content_type == "text/plain" and len(decoded) > len(best_text):
+                                                best_text = decoded
+                                            elif content_type == "text/html" and len(decoded) > len(best_html):
+                                                best_html = decoded
+                                            break
+                                        except:
+                                            continue
+                            except:
+                                pass
+            except Exception as e:
+                logger.error(f"Error processing message part: {e}")
+        
+        # Start processing from the root message
+        try:
+            # Check if this is a forwarded message
+            subject = msg.get('Subject', '')
+            is_forwarded = subject.startswith('Fwd:') or 'forwarded' in subject.lower()
+            if is_forwarded:
+                content['is_forwarded'] = True
+                logger.info(f"Processing forwarded email: {subject}")
+            
+            # Process the message
+            process_part(msg)
+            
+            # Set the best content we found
+            if best_html:
+                content['html'] = best_html
+            
+            if best_text:
+                content['text'] = best_text
+            
+            # Check content lengths
+            html_len = len(content['html'])
+            text_len = len(content['text'])
+            logger.info(f"Extracted HTML: {html_len} chars, text: {text_len} chars from email: {subject}")
+            
+            # If we don't have meaningful content, try to extract from raw
+            if (html_len < 100 and text_len < 100) and msg.is_multipart():
+                logger.warning(f"Limited content extracted, trying alternative methods for: {subject}")
+                raw_content = str(msg)
+                # Store raw content for later processing
+                content['raw_content'] = raw_content
+                
+                # Try to identify better content in the raw message
+                if "<html" in raw_content:
+                    # Find complete HTML document if it exists
+                    import re
+                    html_match = re.search(r'<html[^>]*>.*?</html>', raw_content, re.DOTALL | re.IGNORECASE)
+                    if html_match:
+                        html_doc = html_match.group(0)
+                        if len(html_doc) > html_len:
+                            content['html'] = html_doc
+                            logger.info(f"Found better HTML content in raw message: {len(html_doc)} chars")
+        
+        except Exception as e:
+            logger.error(f"Error extracting email content: {e}", exc_info=True)
+        
+        # Ensure we have some content, even if it's minimal
+        if not content['html'] and not content['text']:
+            logger.warning("No text or HTML content found, using raw email as fallback")
+            content['text'] = f"Email received with subject: {msg.get('Subject', 'No Subject')}"
         
         return content
     

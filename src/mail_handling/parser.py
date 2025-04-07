@@ -183,8 +183,33 @@ class EmailParser:
             if not message_body or len(message_body) < 50:
                 logger.warning(f"No substantial content found in email: {subject}")
                 
-                # Create a minimal content if nothing was found
-                message_body = f"Email '{subject}' with no extractable content."
+                # Try to combine all available content sources
+                all_content = []
+                
+                # Add HTML content if available
+                if email_data.get('html_content'):
+                    all_content.append(self._extract_text_from_html(email_data['html_content']))
+                
+                # Add text content if available
+                if email_data.get('text_content'):
+                    all_content.append(email_data['text_content'])
+                
+                # Add any content from the content dictionary
+                if isinstance(content, dict):
+                    for key, value in content.items():
+                        if isinstance(value, str) and len(value) > 50:
+                            if '<html' in value.lower():
+                                all_content.append(self._extract_text_from_html(value))
+                            else:
+                                all_content.append(value)
+                
+                # Combine all content
+                if all_content:
+                    message_body = "\n\n".join(all_content)
+                    logger.info(f"Combined content from multiple sources: {len(message_body)} chars")
+                else:
+                    # Create a minimal content if nothing was found
+                    message_body = f"Email '{subject}' with no extractable content."
             
             # Extract links from content
             links = []
@@ -198,17 +223,6 @@ class EmailParser:
             email_data['content'] = message_body
             email_data['content_type'] = 'html' if '<html' in message_body.lower() or '<div' in message_body.lower() else 'text'
             email_data['links'] = links
-            
-            # Also check content in email_content field if it's a dictionary
-            if isinstance(content, dict) and 'content' in content and content['content'] and len(content['content']) > len(message_body):
-                logger.info("Using content from email_content field")
-                message_body = content['content']
-                content_type = content.get('content_type', 'text')
-                email_data['content'] = message_body
-                email_data['content_type'] = content_type
-                # Re-extract links with the new content
-                links = self.extract_links(message_body, content_type)
-                email_data['links'] = links
             
             return email_data
         

@@ -80,51 +80,43 @@ class SummaryGenerator:
         # Count meaningful content items
         meaningful_items = 0
         
+        # First pass: Calculate total content length from all sources
         for item in processed_content:
+            item_total_length = 0
+            
+            # Check main content
             content = item.get('content', '')
+            if isinstance(content, str):
+                item_total_length += len(content)
             
-            # Handle case where content might be in other fields
-            if isinstance(content, str) and len(content) <= min_content_length:
-                # Try to find content in other fields
-                for field in ['raw_content', 'main_content', 'text', 'html']:
-                    if field in item and isinstance(item[field], str) and len(item[field]) > len(content):
-                        content = item[field]
-                        break
-            
-            # Also check content in nested structures
+            # Check original email content
             if 'original_email' in item and isinstance(item['original_email'], dict):
                 email_content = item['original_email'].get('content', '')
-                if isinstance(email_content, str) and len(email_content) > len(content):
-                    content = email_content
+                if isinstance(email_content, str):
+                    item_total_length = max(item_total_length, len(email_content))
             
-            # Check articles if present
+            # Check articles
             for article in item.get('articles', []):
                 if isinstance(article, dict) and isinstance(article.get('content'), str):
                     article_content = article.get('content', '')
-                    total_content_length += len(article_content)
-                    if len(article_content) > min_content_length:
-                        has_meaningful_content = True
-                        meaningful_items += 1
+                    item_total_length += len(article_content)
             
-            if isinstance(content, str) and len(content) > min_content_length:
+            # If this item has meaningful content, count it
+            if item_total_length > min_content_length:
                 has_meaningful_content = True
-                total_content_length += len(content)
                 meaningful_items += 1
+                total_content_length += item_total_length
         
         if not has_meaningful_content:
             logger.error("No meaningful content found in processed items")
             # Create a clear message about the empty content
             empty_message = "NO MEANINGFUL NEWSLETTER CONTENT TO SUMMARIZE\n\n"
-            
-            # Add details about what was received
             empty_message += f"Received {len(processed_content)} content items, but none contained meaningful text.\n"
             empty_message += "Content sources:\n"
-            
             for item in processed_content:
                 source = item.get('source', 'Unknown')
                 content_len = len(item.get('content', '')) if isinstance(item.get('content', ''), str) else 0
                 empty_message += f"- {source}: {content_len} characters\n"
-            
             return empty_message
         
         logger.info(f"Found {meaningful_items} meaningful content items with total length of {total_content_length} characters")
@@ -142,10 +134,9 @@ class SummaryGenerator:
         available_tokens = max_content_tokens - reserved_tokens
         
         # Estimate total content size
-        total_chars = total_content_length
-        estimated_tokens = total_chars * tokens_per_char
+        estimated_tokens = total_content_length * tokens_per_char
         
-        logger.info(f"Estimated content size: {total_chars} chars, ~{int(estimated_tokens)} tokens")
+        logger.info(f"Estimated content size: {total_content_length} chars, ~{int(estimated_tokens)} tokens")
         
         # Calculate scaling factor if we need to reduce content
         scaling_factor = 1.0
@@ -153,22 +144,19 @@ class SummaryGenerator:
             scaling_factor = available_tokens / estimated_tokens
             logger.warning(f"Content too large, scaling down to {scaling_factor:.2f} of original size")
         
-        # Add each content item with scaled sizes
+        # Second pass: Format content with scaling
         for item in processed_content:
             # Add basic item information
             item_text = f"SOURCE: {item.get('source', 'Unknown')}\n"
             
-            # Handle date which could be a string or datetime object
+            # Handle date
             date_value = item.get('date', datetime.now())
             if isinstance(date_value, str):
-                # If it's a string, just use it directly
                 item_text += f"DATE: {date_value}\n"
             else:
-                # If it's a datetime object, format it
                 try:
                     item_text += f"DATE: {date_value.strftime('%Y-%m-%d')}\n"
                 except Exception as e:
-                    # Fallback to current date if there's any error
                     logger.warning(f"Error formatting date: {e}, using current date")
                     item_text += f"DATE: {datetime.now().strftime('%Y-%m-%d')}\n"
             
@@ -178,125 +166,95 @@ class SummaryGenerator:
             if item.get('is_merged', False) and 'sources' in item:
                 item_text += f"MERGED FROM SOURCES: {', '.join(item['sources'])}\n\n"
             
-            # Add main content with intelligent size management
+            # Get the best content from all available sources
+            best_content = ''
+            content_sources = []
+            
+            # Check main content
             content = item.get('content', '')
-            content_size = len(content)
+            if isinstance(content, str) and len(content) > len(best_content):
+                best_content = content
+                content_sources.append(('main', len(content)))
             
-            # Calculate maximum allowed size for this content based on scaling
-            if scaling_factor < 1.0:
-                # Scale down content size based on its proportion of the total
-                max_content_chars = int(content_size * scaling_factor)
-                
-                # Ensure minimum reasonable size
-                max_content_chars = max(3000, max_content_chars)
-                
-                if content_size > max_content_chars:
-                    # Intelligent truncation - include beginning and end
-                    first_portion = content[:max_content_chars // 2]
-                    second_portion = content[-(max_content_chars // 2):]
-                    content = first_portion + "\n\n[...CONTENT ABBREVIATED...]\n\n" + second_portion
-                    logger.debug(f"Truncated content for '{item.get('source', 'Unknown')}' from {content_size} to {len(content)} chars")
+            # Check original email
+            if 'original_email' in item and isinstance(item['original_email'], dict):
+                email_content = item['original_email'].get('content', '')
+                if isinstance(email_content, str) and len(email_content) > len(best_content):
+                    best_content = email_content
+                    content_sources.append(('email', len(email_content)))
             
-            item_text += f"CONTENT:\n{content}\n\n"
+            # Add articles with their own scaling
+            article_texts = []
+            for article in item.get('articles', []):
+                if isinstance(article, dict) and isinstance(article.get('content'), str):
+                    article_content = article.get('content', '')
+                    if len(article_content) > min_content_length:
+                        # Scale article content if needed
+                        if scaling_factor < 1.0:
+                            max_article_chars = int(len(article_content) * scaling_factor)
+                            max_article_chars = max(1000, max_article_chars)  # Ensure minimum size
+                            if len(article_content) > max_article_chars:
+                                first_part = article_content[:max_article_chars // 2]
+                                second_part = article_content[-(max_article_chars // 2):]
+                                article_content = first_part + "\n\n[...ARTICLE CONTENT ABBREVIATED...]\n\n" + second_part
+                        article_texts.append(f"\nARTICLE: {article.get('title', '')}\n{article_content}")
+                        content_sources.append(('article', len(article_content)))
             
-            # Add source URLs if available - AFTER the content
-            email_content = item.get('original_email', {})
+            # Scale the best content if needed
+            if scaling_factor < 1.0 and best_content:
+                max_content_chars = int(len(best_content) * scaling_factor)
+                max_content_chars = max(3000, max_content_chars)  # Ensure minimum size
+                if len(best_content) > max_content_chars:
+                    first_portion = best_content[:max_content_chars // 2]
+                    second_portion = best_content[-(max_content_chars // 2):]
+                    best_content = first_portion + "\n\n[...CONTENT ABBREVIATED...]\n\n" + second_portion
+                    logger.debug(f"Truncated content for '{item.get('source', 'Unknown')}' from {len(best_content)} to {len(best_content)} chars")
+            
+            # Add the best content and articles
+            if best_content:
+                item_text += f"CONTENT:\n{best_content}\n"
+            item_text += "\n".join(article_texts)
+            
+            # Log content sources for debugging
+            logger.debug(f"Content sources for {item.get('source', 'Unknown')}: {content_sources}")
+            
+            # Add source URLs if available
             source_links = []
-            article_sources = []
             
-            # Check if there's a web version link in the email
+            # Check for web version link
+            email_content = item.get('original_email', {})
             if isinstance(email_content, dict) and 'links' in email_content:
                 for link in email_content.get('links', []):
-                    # Look for typical "View in browser" or "Web version" links
                     title = link.get('title', '').lower()
                     url = link.get('url', '')
-                    
-                    # Filter out tracking/redirect URLs
-                    if self._is_tracking_url(url):
-                        # Try to unwrap the tracking URL
-                        unwrapped_url = self._unwrap_tracking_url(url)
-                        if unwrapped_url:
-                            url = unwrapped_url
-                        else:
-                            logger.warning(f"Skipping tracking URL that couldn't be unwrapped: {url}")
-                            continue
-                        
                     if url and ('web' in title or 'browser' in title or 'view' in title):
-                        source_links.append(f"WEB VERSION: {link.get('title', 'Web Version')} - {url}")
-                        break
+                        if not self._is_tracking_url(url):
+                            source_links.append(f"WEB VERSION: {link.get('title', 'Web Version')} - {url}")
+                            break
+                        else:
+                            unwrapped_url = self._unwrap_tracking_url(url)
+                            if unwrapped_url:
+                                source_links.append(f"WEB VERSION: {link.get('title', 'Web Version')} - {unwrapped_url}")
+                                break
             
             # Add article URLs
-            articles = item.get('articles', [])
-            for article in articles:
+            for article in item.get('articles', []):
                 article_url = article.get('url', '')
                 article_title = article.get('title', '')
-                
-                # Filter out tracking/redirect URLs or unwrap them
-                if self._is_tracking_url(article_url):
-                    # Try to unwrap the tracking URL
-                    unwrapped_url = self._unwrap_tracking_url(article_url)
-                    if unwrapped_url:
-                        article_url = unwrapped_url
-                    else:
-                        logger.warning(f"Skipping tracking URL for article '{article_title}': {article_url}")
-                        continue
-                    
                 if article_url and article_title:
-                    article_source = f"ARTICLE: {article_title} - {article_url}"
-                    source_links.append(article_source)
-                    article_sources.append({
-                        'title': article_title,
-                        'url': article_url
-                    })
-            
-            # Also check for any direct URLs in the content that might be useful
-            if isinstance(email_content, dict) and 'links' in email_content:
-                # Get all non-tracking links from the email
-                for link in email_content.get('links', []):
-                    url = link.get('url', '')
-                    title = link.get('title', '')
-                    
-                    # Skip tracking URLs
-                    if self._is_tracking_url(url):
-                        unwrapped_url = self._unwrap_tracking_url(url)
+                    if not self._is_tracking_url(article_url):
+                        source_links.append(f"ARTICLE: {article_title} - {article_url}")
+                    else:
+                        unwrapped_url = self._unwrap_tracking_url(article_url)
                         if unwrapped_url:
-                            url = unwrapped_url
-                        else:
-                            continue
-                    
-                    # Don't add duplicates
-                    is_duplicate = False
-                    for existing in article_sources:
-                        if existing['url'] == url or existing['title'] == title:
-                            is_duplicate = True
-                            break
-                    
-                    if not is_duplicate and url and title and len(title) > 3:
-                        source_links.append(f"LINK: {title} - {url}")
-                        article_sources.append({
-                            'title': title,
-                            'url': url
-                        })
+                            source_links.append(f"ARTICLE: {article_title} - {unwrapped_url}")
             
-            # Add source links to the content
+            # Add source links if any
             if source_links:
-                item_text += "SOURCE LINKS:\n" + "\n".join(source_links) + "\n"
-                
-                # Also add a more explicit message about using these links for "Read more" links
-                item_text += "\nIMPORTANT LINK INSTRUCTIONS:\n"
-                item_text += "1. For the article summaries above, use ONLY the exact URLs listed above as 'Read more' links.\n"
-                item_text += "2. DO NOT invent or create placeholder URLs (like example.com).\n"
-                item_text += "3. Each 'Read more' link MUST use a real URL found in the SOURCE LINKS section.\n"
-                item_text += "4. If you can't find a matching URL for an article you summarized, DO NOT include a 'Read more' link for that article.\n"
-                item_text += "5. Format each link correctly as: <a href=\"EXACT_URL_FROM_ABOVE\">Read more →</a>\n"
-            else:
-                # If no links were found, add a note about this
-                item_text += "\nNOTE: No source links were found for this content. Do not create placeholder URLs in 'Read more' links.\n"
+                item_text += "\n\nSOURCE LINKS:\n" + "\n".join(source_links)
             
-            # Add to formatted content
             formatted_content.append(item_text)
         
-        # Join all items with a separator
         final_content = "\n\n" + "-" * 50 + "\n\n".join(formatted_content)
         
         # Final safety check
