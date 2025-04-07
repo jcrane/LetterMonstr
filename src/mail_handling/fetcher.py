@@ -13,6 +13,7 @@ import socket
 import time
 import email as email_lib
 from email.header import decode_header
+import base64
 
 # Add the project root to the Python path for imports
 current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -398,10 +399,11 @@ class EmailFetcher:
                         # Get the payload
                         payload = part.get_payload(decode=True)
                         if payload:
+                            # Convert binary data to string representation for storage
                             content['attachments'].append({
                                 'filename': filename,
                                 'content_type': content_type,
-                                'data': payload
+                                'data': base64.b64encode(payload).decode('utf-8')  # Convert binary to base64 string
                             })
                 except Exception as e:
                     logger.error(f"Error processing attachment: {e}")
@@ -642,6 +644,33 @@ class EmailFetcher:
                 )
                 main_content.set_content(email_data['main_content'])
                 session.add(main_content)
+                
+            # Store raw email content if available
+            if 'raw_email' in email_data:
+                raw_email_content = EmailContent(
+                    email_id=email_id,
+                    content_type='raw_email'
+                )
+                raw_email_content.set_content(email_data['raw_email'])
+                session.add(raw_email_content)
+                
+            # Store raw message content if available
+            if 'raw_message' in email_data:
+                raw_message_content = EmailContent(
+                    email_id=email_id,
+                    content_type='raw_message'
+                )
+                raw_message_content.set_content(email_data['raw_message'])
+                session.add(raw_message_content)
+                
+            # Store content dictionary if available
+            if 'content' in email_data:
+                content_dict = EmailContent(
+                    email_id=email_id,
+                    content_type='content_dict'
+                )
+                content_dict.set_content(email_data['content'])
+                session.add(content_dict)
                 
             session.commit()
             logger.debug(f"Successfully stored content for email ID: {email_id}")

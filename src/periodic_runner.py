@@ -690,26 +690,9 @@ def main():
     if force:
         logger.info("Force flag detected, generating summary immediately")
         generate_and_send_summary(force=True)
-        
-    # Set up periodic tasks
-    if config['email'].get('periodic_fetch', False):
-        logger.info("Scheduled fetch and process to run every hour")
-        schedule.every().hour.do(run_periodic_fetch)
-        
-    # Schedule summary check every 15 minutes
-    logger.info("Scheduled summary check to run every 15 minutes")
-    schedule.every(15).minutes.do(generate_and_send_summary)
     
-    # Run initial fetch and process
-    run_periodic_fetch()
-    
-    # Run initial summary check
-    generate_and_send_summary()
-    
-    logger.info("Starting scheduler")
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
+    # Use the setup_scheduler function to handle all scheduling
+    setup_scheduler()
 
 if __name__ == "__main__":
     main() 
