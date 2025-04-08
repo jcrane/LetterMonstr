@@ -32,28 +32,46 @@ EXTREMELY IMPORTANT INSTRUCTIONS:
 6. Make each summary section detailed enough that the user understands the key points without needing to read the original.
 7. Focus on factual information and ensure the summary reflects the depth of the original content.
 
-HTML OUTPUT FORMAT - CRITICAL:
-1. Output CLEAN, PROPERLY FORMATTED HTML that will render correctly in Gmail.
-2. Use HTML tags for all formatting: <h1>, <h2>, <h3> for headings; <p> for paragraphs; <ul> and <li> for lists.
-3. DO NOT use markdown formatting like # for headings or * for lists - use proper HTML tags only.
-4. Ensure all HTML tags are properly closed and nested correctly.
-5. Use <br> tags sparingly - prefer proper paragraph (<p>) tags for text separation.
+HTML OUTPUT FORMAT - EXTREMELY CRITICAL:
+1. Output CLEAN, PROPERLY FORMATTED HTML ONLY - NO MARKDOWN WHATSOEVER.
+2. DO NOT USE MARKDOWN SYMBOLS LIKE #, *, -, or [] ANYWHERE in your response.
+3. For ALL headings, use proper HTML tags: <h1>Main Heading</h1>, <h2>Subheading</h2>, <h3>Minor heading</h3>
+4. For ALL paragraphs, use proper <p>Paragraph text goes here</p> tags.
+5. For ALL lists, use proper HTML: <ul><li>First item</li><li>Second item</li></ul>
+6. For ALL links, use proper HTML: <a href="https://example.com">Link text</a>
+7. Format "Read more" links as: <a href="URL" class="read-more">Read more</a>
+8. Ensure all HTML tags are properly closed and nested correctly.
+9. Use <br> tags sparingly - prefer proper paragraph (<p>) tags for text separation.
+10. DO NOT mix HTML with markdown formatting - use HTML tags EXCLUSIVELY.
 
 URL HANDLING - EXTREMELY IMPORTANT:
-1. ALWAYS include "Read more" links after each article or section you summarize using proper HTML: <a href="URL">Read more →</a>
+1. ALWAYS include "Read more" links after each article or section you summarize using proper HTML: <a href="URL" class="read-more">Read more</a>
 2. ONLY use SPECIFIC ARTICLE URLs that point to actual content pages, not homepage/root domains.
 3. DO NOT use links to root domains like "bytebytego.com" or "sciencealert.com" without specific paths to articles.
 4. DO NOT use tracking or redirect URLs from beehiiv.com, mailchimp.com, substack.com, etc.
 5. For each article you summarize, locate its SOURCE URL in the content and use that specific article URL.
 6. If an article does not have a specific URL, simply omit the "Read more" link rather than linking to a root domain.
 7. Position each "Read more" link on its own line after the relevant content summary.
-8. Format all links with proper HTML: <a href="https://specific-article-url.com/path/to/article">Read more →</a>
+8. Format all links with proper HTML: <a href="https://specific-article-url.com/path/to/article" class="read-more">Read more</a>
 
-FORMATTING:
-1. Use proper HTML structure with <h1>, <h2>, <h3> tags for hierarchical headings.
-2. Use <ul> and <li> tags for bullet point lists.
-3. Make sure the summary is visually organized and easy to scan.
-4. Each distinct piece of information should have a clear heading using proper HTML heading tags.
+EXAMPLE OF CORRECT HTML FORMAT:
+<h1>AI and Technology Newsletter Summary</h1>
+
+<h2>AI Model Breakthroughs</h2>
+<p>GPT-4.5 was mistaken for a human in 73% of conversations, outperforming real humans (67%) in believability according to a UC San Diego study.</p>
+<p>AI success rates dropped to 36% without persona context, highlighting the importance of contextual framing.</p>
+<a href="https://research.ucsd.edu/ai-turing-test" class="read-more">Read more</a>
+
+<h2>Meta's New Models</h2>
+<p>Meta has launched a new family of Llama 4 models with multimodal capabilities:</p>
+<ul>
+<li>Scout: Built for efficiency on a single Nvidia chip</li>
+<li>Maverick: Works across 12 languages with text and images</li>
+</ul>
+<p>Behemoth outperforms GPT-4.5 across STEM benchmarks but is not yet released.</p>
+<a href="https://ai.meta.com/blog/llama-4-models" class="read-more">Read more</a>
+
+The above is just an example to show proper HTML formatting. Your actual HTML should include ALL important information from the newsletters.
 
 CONTENT QUALITY NOTES:
 1. The system has automatically cleaned the content to remove most ads, tracking elements, and extraneous content.
