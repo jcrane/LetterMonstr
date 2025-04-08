@@ -368,34 +368,50 @@ class PeriodicFetcher:
     
     def _mark_email_as_processed_in_db(self, session, email):
         """Mark an email as processed in the database without marking it as read in Gmail."""
-        try:
-            # Check if the email is already in the database
-            existing = None
-            if 'message_id' in email:
-                existing = session.query(ProcessedEmail).filter_by(message_id=email['message_id']).first()
-            
-            if existing:
-                # If it exists, update the processed date
-                existing.date_processed = datetime.now()
-                logger.debug(f"Updated existing email {email['subject']} as processed in database")
-                return existing
-            else:
-                # If it doesn't exist, create a new record
-                processed_email = ProcessedEmail(
-                    message_id=email['message_id'],
-                    subject=email['subject'],
-                    sender=email['sender'],
-                    date_received=email['date'],
-                    date_processed=datetime.now()
-                )
-                session.add(processed_email)
-                session.flush()  # To get the ID
-                logger.debug(f"Added new email {email['subject']} to database")
-                return processed_email
+        max_retries = 5
+        retry_delay = 0.5
+        
+        for attempt in range(max_retries):
+            try:
+                # Check if the email is already in the database
+                existing = None
+                if 'message_id' in email:
+                    existing = session.query(ProcessedEmail).filter_by(message_id=email['message_id']).first()
                 
-        except Exception as e:
-            logger.error(f"Error marking email as processed in database: {e}", exc_info=True)
-            raise
+                if existing:
+                    # If it exists, update the processed date
+                    existing.date_processed = datetime.now()
+                    session.flush()  # Attempt to flush changes
+                    logger.debug(f"Updated existing email {email['subject']} as processed in database")
+                    return existing
+                else:
+                    # If it doesn't exist, create a new record
+                    processed_email = ProcessedEmail(
+                        message_id=email['message_id'],
+                        subject=email['subject'],
+                        sender=email['sender'],
+                        date_received=email['date'],
+                        date_processed=datetime.now()
+                    )
+                    session.add(processed_email)
+                    session.flush()  # To get the ID
+                    logger.debug(f"Added new email {email['subject']} to database")
+                    return processed_email
+                    
+            except Exception as e:
+                if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                    # If database is locked and we have retries left
+                    wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                    logger.warning(f"Database locked when marking email as processed, retrying in {wait_time:.2f}s (attempt {attempt+1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"Error marking email as processed in database: {e}", exc_info=True)
+                    raise
+                    
+        # If we reach here, we've exhausted all retries
+        logger.error(f"Failed to mark email as processed after {max_retries} attempts due to database locks")
+        raise Exception(f"Database remained locked after {max_retries} attempts")
 
     def _extract_link_content(self, email_id, content_type, parsed_content, links, session):
         """Extract and store content from links."""
@@ -523,129 +539,239 @@ class PeriodicFetcher:
 
     def _store_email_content(self, email_id, content_type, content, links, session):
         """Store email content and links in the database."""
-        try:
-            # Create content entry
-            content_entry = EmailContent(
-                email_id=email_id,
-                content_type=content_type
-            )
-            
-            # Use the set_content method to properly handle different data types
-            content_entry.set_content(content)
-            
-            session.add(content_entry)
-            session.flush()  # Get ID without committing
-            
-            content_id = content_entry.id
-            logger.debug(f"Created content entry with ID: {content_id}")
-            
-            # Store links if any
-            if links:
-                for link in links:
-                    url = link.get('url', '')
-                    title = link.get('title', '')
-                    
-                    # Skip empty URLs
-                    if not url:
-                        continue
-                    
-                    link_entry = Link(
-                        content_id=content_id,
-                        url=url,
-                        title=title
-                    )
-                    
-                    session.add(link_entry)
+        max_retries = 5
+        retry_delay = 0.5
+        
+        for attempt in range(max_retries):
+            try:
+                # Create content entry
+                content_entry = EmailContent(
+                    email_id=email_id,
+                    content_type=content_type
+                )
                 
-                logger.debug(f"Added {len(links)} links to content ID: {content_id}")
-            
-            # Commit is handled by the caller
-            return content_id
-        except Exception as e:
-            logger.error(f"Error storing email content: {e}", exc_info=True)
-            return None
+                # Use the set_content method to properly handle different data types
+                content_entry.set_content(content)
+                
+                session.add(content_entry)
+                try:
+                    session.flush()  # Get ID without committing
+                except Exception as e:
+                    if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                        # If database is locked and we have retries left, raise to outer handler
+                        raise
+                
+                content_id = content_entry.id
+                logger.debug(f"Created content entry with ID: {content_id}")
+                
+                # Store links if any
+                if links:
+                    for link in links:
+                        url = link.get('url', '')
+                        title = link.get('title', '')
+                        
+                        # Skip empty URLs
+                        if not url:
+                            continue
+                        
+                        link_entry = Link(
+                            content_id=content_id,
+                            url=url,
+                            title=title
+                        )
+                        
+                        session.add(link_entry)
+                    
+                    logger.debug(f"Added {len(links)} links to content ID: {content_id}")
+                
+                # Commit is handled by the caller
+                return content_id
+                
+            except Exception as e:
+                if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                    # If database is locked and we have retries left
+                    wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                    logger.warning(f"Database locked when storing email content, retrying in {wait_time:.2f}s (attempt {attempt+1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"Error storing email content: {e}", exc_info=True)
+                    return None
+        
+        # If we reach here, we've exhausted all retries
+        logger.error(f"Failed to store email content after {max_retries} attempts due to database locks")
+        return None
             
     def _process_content_source(self, session, content, content_type, email_id, subject, date, is_forwarded=False, email_data=None):
         """Process a single content source and create ProcessedContent entry."""
-        try:
-            # Initialize content processor if needed
-            if not hasattr(self, 'content_processor'):
-                logger.info("Initializing ContentProcessor")
-                from src.summarize.processor import ContentProcessor
-                self.content_processor = ContentProcessor(self.db_path)
-            
-            # Skip if already processed based on URL for non-email content
-            if email_id is None and content_type == 'article':
-                source_url = content.get('url', '')
-                if source_url:
-                    existing = session.query(ProcessedContent).filter_by(url=source_url).first()
-                    if existing:
-                        logger.info(f"Content already exists with URL: {source_url}")
-                        return existing
-            
-            # Sanitize the email data to ensure it can be serialized
-            sanitized_email_data = self._sanitize_for_json(email_data) if email_data else None
-            
-            # Extract the best content directly
-            best_content = None
-            best_content_type = None
-            best_content_length = 0
-            
-            # For email content from fetcher, extract HTML or text directly
-            if isinstance(content, dict):
-                if 'html' in content and isinstance(content['html'], str) and len(content['html']) > 1000:
-                    best_content = content['html']
-                    best_content_type = 'html'
-                    best_content_length = len(best_content)
-                    logger.info(f"Found HTML content: {best_content_length} chars")
+        max_retries = 5
+        retry_delay = 0.5
+        
+        for attempt in range(max_retries):
+            try:
+                # Initialize content processor if needed
+                if not hasattr(self, 'content_processor'):
+                    logger.info("Initializing ContentProcessor")
+                    from src.summarize.processor import ContentProcessor
+                    self.content_processor = ContentProcessor(self.db_path)
                 
-                if 'text' in content and isinstance(content['text'], str) and len(content['text']) > best_content_length:
-                    best_content = content['text']
-                    best_content_type = 'text'
-                    best_content_length = len(best_content)
-                    logger.info(f"Found text content: {best_content_length} chars")
-            
-            # If we have substantial content, store it directly
-            if best_content and best_content_length > 5000:
-                logger.info(f"Storing raw {best_content_type} content directly for {subject}: {best_content_length} chars")
+                # Skip if already processed based on URL for non-email content
+                if email_id is None and content_type == 'article':
+                    source_url = content.get('url', '')
+                    if source_url:
+                        existing = session.query(ProcessedContent).filter_by(url=source_url).first()
+                        if existing:
+                            logger.info(f"Content already exists with URL: {source_url}")
+                            return existing
                 
-                # Extract clean text from HTML if needed
-                clean_content = best_content
-                if best_content_type == 'html' and best_content_length > 10000:
+                # Sanitize the email data to ensure it can be serialized
+                sanitized_email_data = self._sanitize_for_json(email_data) if email_data else None
+                
+                # Extract the best content directly
+                best_content = None
+                best_content_type = None
+                best_content_length = 0
+                
+                # For email content from fetcher, extract HTML or text directly
+                if isinstance(content, dict):
+                    if 'html' in content and isinstance(content['html'], str) and len(content['html']) > 1000:
+                        best_content = content['html']
+                        best_content_type = 'html'
+                        best_content_length = len(best_content)
+                        logger.info(f"Found HTML content: {best_content_length} chars")
+                    
+                    if 'text' in content and isinstance(content['text'], str) and len(content['text']) > best_content_length:
+                        best_content = content['text']
+                        best_content_type = 'text'
+                        best_content_length = len(best_content)
+                        logger.info(f"Found text content: {best_content_length} chars")
+                
+                # If we have substantial content, store it directly
+                if best_content and best_content_length > 5000:
+                    logger.info(f"Storing raw {best_content_type} content directly for {subject}: {best_content_length} chars")
+                    
+                    # Extract clean text from HTML if needed
+                    clean_content = best_content
+                    if best_content_type == 'html' and best_content_length > 10000:
+                        try:
+                            from bs4 import BeautifulSoup
+                            soup = BeautifulSoup(best_content, 'html.parser')
+                            text_content = soup.get_text(separator='\n', strip=True)
+                            
+                            if len(text_content) > 1000:
+                                clean_content = text_content
+                                logger.info(f"Extracted clean text from HTML: {len(clean_content)} chars")
+                        except Exception as e:
+                            logger.warning(f"Failed to extract text from HTML: {e}")
+                    
+                    # Generate content hash for deduplication
+                    content_hash = hashlib.md5(f"{subject}_{datetime.now().isoformat()}".encode('utf-8')).hexdigest()
+                    
+                    # Create a JSON structure with all the content variants
+                    content_structure = {
+                        'source': subject,
+                        'date': date.isoformat() if isinstance(date, datetime) else date,
+                        'content': clean_content,
+                        'content_type': content_type,
+                        'is_forwarded': is_forwarded,
+                        'original_length': best_content_length,
+                        'original_content_type': best_content_type
+                    }
+                    
+                    # Add HTML or text if available
+                    if isinstance(content, dict):
+                        if 'html' in content and content['html']:
+                            content_structure['html'] = content['html']
+                        if 'text' in content and content['text']:
+                            content_structure['text'] = content['text']
+                    
+                    # Store the full structure as serialized JSON
+                    serialized_content = json.dumps(content_structure)
+                    
+                    # Create ProcessedContent entry
+                    processed_content = ProcessedContent(
+                        content_hash=content_hash,
+                        email_id=email_id,
+                        source=subject,
+                        content_type=content_type,
+                        processed_content=serialized_content,
+                        date_processed=datetime.now(),
+                        is_summarized=False
+                    )
+                    
+                    session.add(processed_content)
                     try:
-                        from bs4 import BeautifulSoup
-                        soup = BeautifulSoup(best_content, 'html.parser')
-                        text_content = soup.get_text(separator='\n', strip=True)
-                        
-                        if len(text_content) > 1000:
-                            clean_content = text_content
-                            logger.info(f"Extracted clean text from HTML: {len(clean_content)} chars")
+                        session.flush()  # Try to flush changes to get ID
                     except Exception as e:
-                        logger.warning(f"Failed to extract text from HTML: {e}")
+                        if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                            # If database is locked and we have retries left, raise to outer handler
+                            raise
+                    
+                    logger.info(f"Created ProcessedContent entry with ID: {processed_content.id}")
+                    return processed_content
                 
-                # Generate content hash for deduplication
-                content_hash = hashlib.md5(f"{subject}_{datetime.now().isoformat()}".encode('utf-8')).hexdigest()
+                # If no large content found, use the content processor normally
+                logger.info(f"No large content found, using content processor for: {subject}")
                 
-                # Create a JSON structure with all the content variants
-                content_structure = {
+                # Create content item for processing
+                content_item = {
                     'source': subject,
-                    'date': date.isoformat() if isinstance(date, datetime) else date,
-                    'content': clean_content,
+                    'date': date,
                     'content_type': content_type,
                     'is_forwarded': is_forwarded,
-                    'original_length': best_content_length,
-                    'original_content_type': best_content_type
+                    'original_email': sanitized_email_data
                 }
                 
-                # Add HTML or text if available
+                # For email content, set the content directly
+                # If content is a dict (from email_module.fetcher), keep both html and text
                 if isinstance(content, dict):
                     if 'html' in content and content['html']:
-                        content_structure['html'] = content['html']
-                    if 'text' in content and content['text']:
-                        content_structure['text'] = content['text']
+                        content_item['content'] = content['html']
+                        content_item['html'] = content['html']
+                        logger.info(f"Using HTML content from email: {len(content['html'])} chars")
+                    elif 'text' in content and content['text']:
+                        content_item['content'] = content['text']
+                        content_item['text'] = content['text']
+                        logger.info(f"Using text content from email: {len(content['text'])} chars")
+                    
+                    # Store all content variants for later use
+                    for key, value in content.items():
+                        if key not in ['attachments'] and isinstance(value, str) and len(value) > 0:
+                            content_item[key] = value
+                else:
+                    # Simple string content
+                    content_item['content'] = content
                 
-                # Store the full structure as serialized JSON
-                serialized_content = json.dumps(content_structure)
+                # Additional logging to trace content length
+                content_length = 0
+                if isinstance(content_item.get('content'), str):
+                    content_length = len(content_item['content'])
+                logger.info(f"Content item for {subject} has content length: {content_length} chars")
+                
+                # For crawled content, structure differently
+                if content_type == 'article':
+                    content_item['crawled_content'] = [content]
+                
+                # Process through the normal pipeline
+                processed_items = self.content_processor.process_and_deduplicate([content_item])
+                
+                if not processed_items:
+                    logger.warning(f"No processed items returned for: {subject}")
+                    return None
+                
+                processed_item = processed_items[0]  # Take the first item
+                
+                # Generate content hash for deduplication
+                content_hash = self._generate_content_hash(processed_item)
+                
+                # Check if content already exists
+                existing = session.query(ProcessedContent).filter_by(content_hash=content_hash).first()
+                if existing:
+                    logger.info(f"Content already exists with hash: {content_hash}")
+                    return existing
+                
+                # Get the serialized content, which might now be just HTML for large emails
+                serialized_content = json_serialize(processed_item)
                 
                 # Create ProcessedContent entry
                 processed_content = ProcessedContent(
@@ -659,94 +785,30 @@ class PeriodicFetcher:
                 )
                 
                 session.add(processed_content)
-                session.flush()  # Get ID without committing
+                try:
+                    session.flush()  # Try to flush changes to get ID
+                except Exception as e:
+                    if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                        # If database is locked and we have retries left, raise to outer handler
+                        raise
                 
-                logger.info(f"Created ProcessedContent entry with direct content, ID: {processed_content.id}")
+                logger.info(f"Created ProcessedContent entry with ID: {processed_content.id}")
                 return processed_content
-            
-            # If no large content found, use the content processor normally
-            logger.info(f"No large content found, using content processor for: {subject}")
-            
-            # Create content item for processing
-            content_item = {
-                'source': subject,
-                'date': date,
-                'content_type': content_type,
-                'is_forwarded': is_forwarded,
-                'original_email': sanitized_email_data
-            }
-            
-            # For email content, set the content directly
-            # If content is a dict (from email_module.fetcher), keep both html and text
-            if isinstance(content, dict):
-                if 'html' in content and content['html']:
-                    content_item['content'] = content['html']
-                    content_item['html'] = content['html']
-                    logger.info(f"Using HTML content from email: {len(content['html'])} chars")
-                elif 'text' in content and content['text']:
-                    content_item['content'] = content['text']
-                    content_item['text'] = content['text']
-                    logger.info(f"Using text content from email: {len(content['text'])} chars")
                 
-                # Store all content variants for later use
-                for key, value in content.items():
-                    if key not in ['attachments'] and isinstance(value, str) and len(value) > 0:
-                        content_item[key] = value
-            else:
-                # Simple string content
-                content_item['content'] = content
-            
-            # Additional logging to trace content length
-            content_length = 0
-            if isinstance(content_item.get('content'), str):
-                content_length = len(content_item['content'])
-            logger.info(f"Content item for {subject} has content length: {content_length} chars")
-            
-            # For crawled content, structure differently
-            if content_type == 'article':
-                content_item['crawled_content'] = [content]
-            
-            # Process through the normal pipeline
-            processed_items = self.content_processor.process_and_deduplicate([content_item])
-            
-            if not processed_items:
-                logger.warning(f"No processed items returned for: {subject}")
-                return None
-            
-            processed_item = processed_items[0]  # Take the first item
-            
-            # Generate content hash for deduplication
-            content_hash = self._generate_content_hash(processed_item)
-            
-            # Check if content already exists
-            existing = session.query(ProcessedContent).filter_by(content_hash=content_hash).first()
-            if existing:
-                logger.info(f"Content already exists with hash: {content_hash}")
-                return existing
-            
-            # Get the serialized content, which might now be just HTML for large emails
-            serialized_content = json_serialize(processed_item)
-            
-            # Create ProcessedContent entry
-            processed_content = ProcessedContent(
-                content_hash=content_hash,
-                email_id=email_id,
-                source=subject,
-                content_type=content_type,
-                processed_content=serialized_content,
-                date_processed=datetime.now(),
-                is_summarized=False
-            )
-            
-            session.add(processed_content)
-            session.flush()  # Get ID without committing
-            
-            logger.info(f"Created ProcessedContent entry with ID: {processed_content.id}")
-            return processed_content
-            
-        except Exception as e:
-            logger.error(f"Error processing content source: {e}", exc_info=True)
-            return None
+            except Exception as e:
+                if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                    # If database is locked and we have retries left
+                    wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                    logger.warning(f"Database locked when processing content, retrying in {wait_time:.2f}s (attempt {attempt+1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"Error processing content source: {e}", exc_info=True)
+                    return None
+                    
+        # If we reach here, we've exhausted all retries
+        logger.error(f"Failed to process content after {max_retries} attempts due to database locks")
+        return None
 
     def _sanitize_for_json(self, obj):
         """Sanitize an object for JSON serialization by removing or converting problematic fields."""

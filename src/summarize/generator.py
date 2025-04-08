@@ -303,7 +303,11 @@ class SummaryGenerator:
         if not system_prompt:
             system_prompt = LLM_SYSTEM_PROMPTS['newsletter']
             
-        return create_claude_prompt(system_prompt, content)
+        # Return a dictionary structure instead of calling create_claude_prompt
+        return {
+            "system": system_prompt,
+            "user": f"Please summarize the following newsletter content:\n\n{content}"
+        }
     
     def _call_claude_api(self, prompt):
         """Call Claude API to generate a summary."""
@@ -376,93 +380,74 @@ class SummaryGenerator:
         return summary_text
     
     def _store_summary(self, summary_text, processed_content):
-        """Store the summary and mark content as summarized."""
-        if not summary_text or not processed_content:
-            return None
-            
-        # Open database session
+        """Store the summary in the database and mark content as summarized."""
+        logger.info("Storing summary in database")
+        
         session = get_session(self.db_path)
-        try:
-            # Create summary record
-            summary = Summary(
-                summary_type='daily',
-                summary_text=summary_text,
-                period_start=datetime.now(),
-                period_end=datetime.now(),
-                creation_date=datetime.now(),
-                sent=False
-            )
-            
-            session.add(summary)
-            session.flush()  # Get the ID
-            
-            # Update processed content records to mark them as summarized
-            content_hashes = []
-            titles = []
-            for item in processed_content:
-                # Create content hash for lookup
-                content = item.get('content', '')
-                title = item.get('source', '')
+        max_retries = 3
+        retry_count = 0
+        retry_delay = 1
+        
+        while retry_count <= max_retries:
+            try:
+                # Create a new summary entry
+                summary = Summary(
+                    content=summary_text,
+                    date_generated=datetime.now(),
+                    sent=False
+                )
                 
-                # Store title for additional lookup
-                if title:
-                    titles.append(title)
+                session.add(summary)
+                session.flush()  # Get the ID without committing
                 
-                # Create and store multiple types of hashes for better matching
-                # 1. Main content hash
-                content_hash = hashlib.md5((title + content[:100]).encode('utf-8')).hexdigest()
-                content_hashes.append(content_hash)
-                
-                # 2. First paragraph hash (for articles where intros are similar)
-                if content and len(content) > 200:
-                    first_paragraph = content.split('\n\n')[0][:200]
-                    if len(first_paragraph) > 50:
-                        para_hash = hashlib.md5((title + first_paragraph).encode('utf-8')).hexdigest()
-                        content_hashes.append(para_hash)
-            
-            # Update the processed content items - first try by hash
-            updated_count = session.query(ProcessedContent).filter(
-                ProcessedContent.content_hash.in_(content_hashes)
-            ).update(
-                {
-                    'is_summarized': True,
-                    'summary_id': summary.id
-                },
-                synchronize_session=False
-            )
-            
-            # Also try to match by title for any items we missed with hash
-            if titles:
-                for title in titles:
-                    # Skip very short titles to avoid false matches
-                    if not title or len(title) < 5:
-                        continue
+                # Mark the content items as summarized
+                content_ids = []
+                for item in processed_content:
+                    try:
+                        # Handle both ProcessedContent objects and dictionaries
+                        if hasattr(item, 'id'):
+                            item_id = item.id
+                        elif isinstance(item, dict) and 'id' in item:
+                            item_id = item['id']
+                        elif hasattr(item, 'db_id'):
+                            item_id = item.db_id
+                        else:
+                            logger.warning(f"Cannot identify ID for content item: {item}")
+                            continue
                         
-                    title_updated = session.query(ProcessedContent).filter(
-                        ProcessedContent.is_summarized == False,
-                        ProcessedContent.source.like(f"%{title}%")
-                    ).update(
-                        {
-                            'is_summarized': True,
-                            'summary_id': summary.id
-                        },
-                        synchronize_session=False
-                    )
-                    
-                    updated_count += title_updated
-            
-            # Commit changes
-            session.commit()
-            logger.info(f"Stored summary {summary.id} and marked {updated_count} content items as summarized")
-            
-            return summary.id
-            
-        except Exception as e:
-            logger.error(f"Error storing summary: {e}", exc_info=True)
-            session.rollback()
-            return None
-        finally:
-            session.close()
+                        # Update the ProcessedContent record
+                        content_item = session.query(ProcessedContent).get(item_id)
+                        if content_item:
+                            content_item.is_summarized = True
+                            content_item.summary_id = summary.id
+                            content_ids.append(item_id)
+                        else:
+                            logger.warning(f"ProcessedContent with ID {item_id} not found")
+                    except Exception as e:
+                        logger.error(f"Error updating ProcessedContent item: {e}")
+                
+                # Commit all the changes in a single transaction
+                session.commit()
+                logger.info(f"Summary stored with ID: {summary.id}, marked {len(content_ids)} content items as summarized")
+                return summary.id
+                
+            except Exception as e:
+                session.rollback()
+                retry_count += 1
+                
+                if "database is locked" in str(e) and retry_count <= max_retries:
+                    logger.warning(f"Database locked during summary storage, retrying in {retry_delay}s (attempt {retry_count}/{max_retries})")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    logger.error(f"Error storing summary: {e}", exc_info=True)
+                    break
+            finally:
+                if session:
+                    session.close()
+        
+        logger.error("Failed to store summary after multiple attempts")
+        return None
     
     def combine_summaries(self, summaries):
         """Combine multiple summaries into one comprehensive summary."""
@@ -477,9 +462,11 @@ class SummaryGenerator:
         for i, summary in enumerate(summaries):
             formatted_content += f"\n{'==='*20}\n{summary}\n{'==='*20}\n\n"
         
-        # Create instructions for combining summaries
-        instructions = """
-You are a newsletter summarization assistant for the LetterMonstr application.
+        try:
+            # Call Claude API with the combined prompt
+            logger.info(f"Combining {len(summaries)} summaries into one")
+            combined_prompt = {
+                "system": """You are a newsletter summarization assistant for the LetterMonstr application.
 Your task is to combine multiple newsletter summaries into one comprehensive summary.
 
 The summaries below are from different batches of newsletters that have been processed separately.
@@ -490,16 +477,9 @@ Please combine these summaries into a single coherent summary that:
 3. Preserves all important information from each summary
 4. Maintains a clear structure with section headers
 5. Keeps all relevant links
-6. Improves the overall flow and readability
-
-Please provide a single comprehensive and well-organized summary that combines all of the above information,
-eliminating redundancy while preserving all significant content and links.
-"""
-        
-        try:
-            # Call Claude API with the combined prompt
-            logger.info(f"Combining {len(summaries)} summaries into one")
-            combined_prompt = self._create_summary_prompt(formatted_content)
+6. Improves the overall flow and readability""",
+                "user": f"Please combine these newsletter summaries into one comprehensive summary:\n\n{formatted_content}"
+            }
             combined_summary = self._call_claude_api(combined_prompt)
             return combined_summary
         except Exception as e:
