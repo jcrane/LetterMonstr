@@ -12,10 +12,22 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 import re
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse
 
 from src.database.models import get_session, Summary
 
 logger = logging.getLogger(__name__)
+
+def replace_list(match):
+    """Replace list items with HTML list format."""
+    content = match.group(2)
+    return f'</p><ul><li>{content}</li></ul><p>'
+    
+def save_link(match):
+    """Format markdown links as HTML."""
+    text, url = match.groups()
+    return f'<a href="{url}">{text}</a>'
 
 class EmailSender:
     """Sends summary emails to the recipient."""
@@ -124,19 +136,23 @@ class EmailSender:
                     margin-top: 5px;
                     margin-bottom: 15px;
                 }}
-                a[href]:after {{
-                    content: attr(href);
-                    display: none;
-                }}
-                a:has(text="Read more"):after,
-                a:has(text="Read more →"):after {{
-                    content: " →";
-                }}
-                a:has(text="Read more") {{
+                .read-more {{
                     display: inline-block;
                     margin-top: 8px;
                     margin-bottom: 16px;
                     font-weight: 500;
+                    color: #0066cc;
+                    text-decoration: none;
+                }}
+                .read-more::after {{
+                    content: " →";
+                }}
+                .read-more:hover {{
+                    text-decoration: underline;
+                }}
+                .read-more-missing {{
+                    color: #999;
+                    font-style: italic;
                 }}
                 hr {{ 
                     border: 0;
@@ -169,6 +185,30 @@ class EmailSender:
         </body>
         </html>
         """
+        
+        # Clean up any problematic domains in HTML with BeautifulSoup
+        soup = BeautifulSoup(html, 'html.parser')
+        problematic_domains = [
+            'beehiiv.com', 'media.beehiiv.com', 'link.mail.beehiiv.com',
+            'mailchimp.com', 'substack.com', 'bytebytego.com',
+            'sciencealert.com', 'leapfin.com', 'cutt.ly',
+            'genai.works', 'link.genai.works'
+        ]
+        
+        for link in soup.find_all('a'):
+            href = link.get('href')
+            if href:
+                # Check if the link is to a problematic domain root (no specific article)
+                parsed_url = urlparse(href)
+                domain = parsed_url.netloc.lower()
+                
+                if any(prob_domain in domain for prob_domain in problematic_domains) and (
+                   not parsed_url.path or parsed_url.path == '/' or len(parsed_url.path) < 5):
+                    # Replace the link with just its text
+                    link.replace_with(link.text)
+        
+        # Get the final HTML
+        html = str(soup)
         
         # Create plain text version
         text = f"""
@@ -261,86 +301,111 @@ class EmailSender:
             return None 
     
     def _markdown_to_html(self, markdown_text):
-        """Convert markdown to HTML with better formatting."""
-        html = markdown_text
+        """Convert markdown-like text to HTML with improved formatting."""
+        if not markdown_text:
+            return ""
+            
+        # If the content already has full HTML structure, return it as is
+        if markdown_text.strip().startswith('<html') and markdown_text.strip().endswith('</html>'):
+            return markdown_text
+            
+        # Check if the content already has substantial HTML
+        has_html_tags = re.search(r'<h[1-6]>|<p>|<div>|<ul>|<ol>|<li>|<table>', markdown_text)
         
-        # Handle headers (# Header 1, ## Header 2, etc.)
-        html = re.sub(r'^# (.+)$', r'<h1>\1</h1>', html, flags=re.MULTILINE)
-        html = re.sub(r'^## (.+)$', r'<h2>\1</h2>', html, flags=re.MULTILINE)
-        html = re.sub(r'^### (.+)$', r'<h3>\1</h3>', html, flags=re.MULTILINE)
+        if has_html_tags:
+            # Content already has HTML structure, just ensure it has proper paragraphs
+            html = markdown_text
+            
+            # Ensure links are properly formatted with our classes
+            html = re.sub(r'<a\s+href=[\'"]([^\'"]+)[\'"][^>]*>(.*?Read more.*?)</a>', 
+                         r'<a href="\1" class="read-more">\2</a>', html)
+                         
+            # Fix up any broken HTML
+            soup = BeautifulSoup(html, 'html.parser')
+            return str(soup)
         
-        # Handle section dividers (---------)
-        html = re.sub(r'^-{3,}$', r'<hr>', html, flags=re.MULTILINE)
+        # Clean any HTML that might be present in raw form
+        markdown_text = re.sub(r'<br\s*/?>', '\n', markdown_text)
+        markdown_text = re.sub(r'</p>\s*<p>', '\n\n', markdown_text)
+        markdown_text = re.sub(r'</?p>', '', markdown_text)
         
-        # Handle bolding (**text**)
+        # Replace newlines with <br> tags
+        html = markdown_text.replace('\n\n', '</p><p>').replace('\n', '<br>')
+        
+        # Wrap in paragraph tags if not already wrapped
+        if not html.startswith('<p>'):
+            html = '<p>' + html
+        if not html.endswith('</p>'):
+            html += '</p>'
+        
+        # Replace headers
+        # h1 - match lines like # Header or == Header == or HEADER:
+        html = re.sub(r'^#\s+(.+?)$|^==\s*(.+?)\s*==|^([A-Z][A-Z\s&]+[A-Z])(?::|\s*$)',
+                      lambda m: f'</p><h1>{m.group(1) or m.group(2) or m.group(3)}</h1><p>', 
+                      html, flags=re.MULTILINE)
+        
+        # h2 - match lines like ## Header or -- Header --
+        html = re.sub(r'^##\s+(.+?)$|^--\s*(.+?)\s*--',
+                      lambda m: f'</p><h2>{m.group(1) or m.group(2)}</h2><p>', 
+                      html, flags=re.MULTILINE)
+        
+        # h3 - match lines like ### Header
+        html = re.sub(r'^###\s+(.+?)$',
+                      lambda m: f'</p><h3>{m.group(1)}</h3><p>', 
+                      html, flags=re.MULTILINE)
+                      
+        # Replace **bold** with <strong>bold</strong>
         html = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', html)
         
-        # Handle italics (*text*)
+        # Replace *italic* with <em>italic</em>
         html = re.sub(r'\*(.+?)\*', r'<em>\1</em>', html)
         
-        # Handle lists
-        # Convert unordered list items
-        html = re.sub(r'^\* (.+)$', r'<li>\1</li>', html, flags=re.MULTILINE)
+        # Replace lists
+        html = re.sub(r'(<br>|<p>)\s*[-•]\s+(.+?)(?=<br>|</p>)', replace_list, html)
         
-        # Group list items into <ul> tags
-        list_pattern = r'(<li>.+</li>\n)+'
+        # Handle "Read more" links
+        # First, convert direct reference style
+        html = re.sub(r'\[Read more\]\s*\((https?://[^)]+)\)', r'<a href="\1" class="read-more">Read more →</a>', html)
         
-        def replace_list(match):
-            list_content = match.group(0)
-            return f'<ul>\n{list_content}</ul>'
+        # Handle inline HTML links that contain "Read more"
+        html = re.sub(r'<a\s+href=[\'"]([^\'"]+)[\'"][^>]*>(.*?Read more.*?)</a>', 
+                     r'<a href="\1" class="read-more">\2</a>', html)
         
-        html = re.sub(list_pattern, replace_list, html)
+        # Fix links that point to problematic domains (root domains without proper articles)
+        problematic_domains = [
+            'beehiiv.com', 'media.beehiiv.com', 'link.mail.beehiiv.com',
+            'mailchimp.com', 'substack.com', 'bytebytego.com',
+            'sciencealert.com', 'leapfin.com', 'cutt.ly',
+            'genai.works', 'link.genai.works'
+        ]
         
-        # Handle paragraphs (lines followed by blank lines)
-        html = re.sub(r'([^\n]+)\n\n', r'<p>\1</p>\n\n', html)
+        for domain in problematic_domains:
+            # Find links to problematic root domains and remove them
+            pattern = f'<a href=[\'"]https?://(?:www\\.)?{domain}/?[\'"][^>]*>([^<]+)</a>'
+            html = re.sub(pattern, r'\1', html)  # Replace with just the text content
         
-        # Preserve existing HTML links
-        # First identify existing <a> tags and replace with placeholders
-        links = []
+        # Special case for "Read more" links without href
+        html = re.sub(r'(?<![\'"])Read more(?![\'"]\s*\])',
+                     r'<span class="read-more-missing">Read more</span>', html)
         
-        def save_link(match):
-            links.append(match.group(0))
-            return f"__LINK_PLACEHOLDER_{len(links)-1}__"
-            
-        html = re.sub(r'<a\s+href="[^"]*"[^>]*>[^<]*</a>', save_link, html)
+        # Handle other links - save links
+        html = re.sub(r'\[([^\]]+)\]\s*\((https?://[^)]+)\)', save_link, html)
         
-        # Handle markdown links [text](url)
-        html = re.sub(r'\[(.+?)\]\((.+?)\)', r'<a href="\2">\1</a>', html)
+        # Fix any broken paragraphs
+        html = html.replace('</p><br><p>', '</p><p>')
+        html = re.sub(r'<p>\s*</p>', '', html)
         
-        # Handle HTML link syntax that might be in text directly 
-        html = re.sub(r'<a href="([^"]*)"[^>]*>([^<]*)</a>', r'<a href="\1">\2</a>', html)
+        # Fix nested paragraphs
+        html = re.sub(r'<p>(\s*<p>)', r'\1', html)
+        html = re.sub(r'(</p>\s*)</p>', r'\1', html)
         
-        # Make sure source links are properly formatted
-        html = re.sub(r'\[Source: ([^\]]+)\]', r'<a href="\1" class="source-link">Source: \1</a>', html)
-        
-        # Ensure all URLs are proper links - make http URLs clickable
-        url_pattern = r'(?<!href=")(https?://[^\s<>"]+)'
-        html = re.sub(url_pattern, r'<a href="\1">\1</a>', html)
-        
-        # Restore original link placeholders
-        for i, link in enumerate(links):
-            placeholder = f"__LINK_PLACEHOLDER_{i}__"
-            html = html.replace(placeholder, link)
-        
-        # Convert remaining newlines to <br> tags, but avoid adding between HTML tags
-        # First split by lines
-        lines = html.split('\n')
-        
-        # Then join with <br> tags, skipping certain cases
-        result = ""
-        for i, line in enumerate(lines):
-            if i > 0:  # Skip adding <br> before the first line
-                # Don't add <br> after opening tags or before closing tags
-                if (line.strip().startswith('<') and not line.strip().startswith('</')) or \
-                   (i < len(lines)-1 and lines[i+1].strip().startswith('</')) or \
-                   line.strip() == '':
-                    result += '\n' + line
-                else:
-                    result += '<br>\n' + line
-            else:
-                result += line
-        
-        return result
+        # Final cleanup with BeautifulSoup to ensure valid HTML
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            return str(soup)
+        except Exception as e:
+            logger.error(f"Error cleaning HTML: {e}")
+            return html
     
     def _get_domain(self, url):
         """Extract domain name from URL for display purposes."""

@@ -20,20 +20,28 @@ logger = logging.getLogger(__name__)
 
 # Define the system prompts for different summary formats
 LLM_SYSTEM_PROMPTS = {
-    'newsletter': """You are an expert email summarizer that creates concise, informative summaries of newsletter content. 
-Extract the key information, insights, and main points from the provided content.
+    'newsletter': """You are an expert email summarizer that creates comprehensive, detailed summaries of newsletter content. 
+Extract ALL key information, insights, and main points from the provided content.
+Do not omit or truncate important content - include all significant information.
 Organize the summary by category or topic, with clear headings.
-Be factual, objective, and comprehensive while maintaining brevity.
-Include important details, statistics, and quotes when relevant.
-Your summary should be well-structured with short paragraphs, bullet points, and clear formatting.
-Write in a professional, engaging style that retains the essence of the original content.
+Be thorough, factual, objective, and comprehensive in your coverage.
+Include all important details, statistics, quotes, and unique information from each source.
+Your summary should be well-structured with proper headings, paragraphs, bullet points, and clear formatting.
+ALWAYS include "Read more" links with the original URLs for each article or section you summarize.
+Format "Read more" links as HTML: <a href="URL">Read more</a>
+Never abbreviate or simplify content to the point of information loss.
+Write in a professional, engaging style that retains the essence and depth of the original content.
 """,
-    'weekly': """You are an expert email summarizer that creates weekly digests of newsletter content.
-Organize the summary by category (Technology, Business, Science, etc) to help the reader quickly find relevant information.
-For each item, include a concise description of the main points, key insights, and any important details.
-Use clear headings, short paragraphs, and bullet points for readability.
-Be factual, objective, and comprehensive while maintaining brevity.
-Write in a professional, engaging style that makes complex topics accessible.
+    'weekly': """You are an expert email summarizer that creates comprehensive weekly digests of newsletter content.
+Organize the summary by clear categories (Technology, Business, Science, etc.) with descriptive headings.
+For each item, include a thorough description covering ALL main points, key insights, and important details.
+Do not abbreviate or simplify to the point of information loss - capture the full depth of each article.
+Use clear hierarchical headings, properly formatted paragraphs, and bullet points for readability.
+Be thorough, factual, objective, and comprehensive in your coverage.
+ALWAYS include "Read more" links with the original URLs for each article or section you summarize.
+Format "Read more" links as HTML: <a href="URL">Read more</a>
+Write in a professional, engaging style that makes complex topics accessible without sacrificing detail.
+Never omit significant information - your summary should reflect the full depth and breadth of the original content.
 """
 }
 
@@ -96,7 +104,7 @@ class SummaryGenerator:
         
         # For very large content, adjust the prompt to request more concise summaries
         if token_estimate > 10000:
-            system_prompt += f"\n\nNOTE: You are summarizing a very large amount of content ({content_length} characters). Please be concise and focus on the most important points."
+            system_prompt += f"\n\nNOTE: You are summarizing a very large amount of content ({content_length} characters). Focus on capturing ALL important information while maintaining readability."
         
         # Create the prompt for Claude
         prompt = self._create_summary_prompt(prepared_content, system_prompt)
@@ -134,6 +142,57 @@ class SummaryGenerator:
         
         # Count meaningful content items
         meaningful_items = 0
+        
+        # Define problematic domains to filter out
+        problematic_domains = [
+            'beehiiv.com', 'media.beehiiv.com', 'link.mail.beehiiv.com',
+            'mailchimp.com', 'substack.com', 'bytebytego.com',
+            'sciencealert.com', 'leapfin.com', 'cutt.ly',
+            'genai.works', 'link.genai.works'
+        ]
+        
+        # Helper function to check if a URL is just a root domain (not a specific article)
+        def is_root_domain(url):
+            if not url or not isinstance(url, str):
+                return True
+                
+            # Parse the URL
+            from urllib.parse import urlparse
+            parsed_url = urlparse(url)
+            
+            # Check if it's just a root domain
+            return (not parsed_url.path or parsed_url.path == '/' or 
+                    parsed_url.path.lower() in ['/index.html', '/index.php', '/home'] or
+                    len(parsed_url.path) < 5)
+        
+        # Helper function to filter URLs
+        def filter_urls(urls):
+            if not urls:
+                return []
+                
+            filtered = []
+            for url in urls:
+                # Skip if not a string
+                if not isinstance(url, str):
+                    continue
+                    
+                # Skip if not http(s)
+                if not url.lower().startswith(('http://', 'https://')):
+                    continue
+                    
+                # Parse the URL
+                from urllib.parse import urlparse
+                parsed_url = urlparse(url)
+                
+                # Skip if it's a problematic domain and just a root
+                domain = parsed_url.netloc.lower()
+                if any(domain.endswith(prob) for prob in problematic_domains) and is_root_domain(url):
+                    logger.info(f"Filtering out root domain URL: {url}")
+                    continue
+                    
+                filtered.append(url)
+                
+            return filtered
         
         # First pass: Calculate total content length from all sources
         for item in processed_content:
@@ -200,6 +259,28 @@ class SummaryGenerator:
                 has_meaningful_content = True
                 meaningful_items += 1
                 total_content_length += item_total_length
+                
+                # Extract any URLs from raw content for later use
+                if 'urls' not in item and isinstance(item.get('content', ''), str):
+                    try:
+                        import re
+                        url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
+                        content_urls = re.findall(url_pattern, item['content'])
+                        item['urls'] = filter_urls(content_urls)
+                    except Exception as e:
+                        logger.warning(f"Error extracting URLs from content: {e}")
+                        
+                # Extract URLs from articles if present
+                if 'articles' in item:
+                    for article in item['articles']:
+                        if isinstance(article, dict) and 'url' in article:
+                            article_url = article['url']
+                            # Add URL to item URLs if it's not a root domain
+                            if not is_root_domain(article_url):
+                                if 'urls' not in item:
+                                    item['urls'] = []
+                                if article_url not in item['urls']:
+                                    item['urls'].append(article_url)
         
         if not has_meaningful_content:
             logger.error("No meaningful content found in processed items")
@@ -217,7 +298,7 @@ class SummaryGenerator:
         
         # Second pass: Format content for summary
         # Calculate available tokens for each item
-        max_tokens = 12000  # Assuming a max of 8000 tokens for Claude
+        max_tokens = self.max_tokens  # Use value from config
         token_margin = 1000  # Leave some margin for prompt and response
         available_tokens = max_tokens - token_margin
         
@@ -235,21 +316,71 @@ class SummaryGenerator:
                 
                 # Format this item
                 source = item.get('source', 'Unknown Source')
-                formatted_item = f"==== {source} ====\n\n{content}\n\n"
+                
+                # Extract URLs from the content or item for "Read more" links
+                source_links = []
+                
+                # Try to find URLs in the item
+                if 'url' in item and item['url'] and not is_root_domain(item['url']):
+                    source_links.append(item['url'])
+                
+                # Get URLs from the item if we extracted them earlier
+                if 'urls' in item and item['urls']:
+                    for url in item['urls']:
+                        if url not in source_links and not is_root_domain(url):
+                            source_links.append(url)
+                
+                # Check for URLs in articles
+                if 'articles' in item and isinstance(item['articles'], list):
+                    for article in item['articles']:
+                        if isinstance(article, dict) and 'url' in article and article['url']:
+                            article_url = article['url']
+                            if not is_root_domain(article_url) and article_url not in source_links:
+                                source_links.append(article_url)
+                
+                # Extract URLs from the content using regex
+                if isinstance(content, str):
+                    import re
+                    url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
+                    content_urls = re.findall(url_pattern, content)
+                    content_urls = filter_urls(content_urls)
+                    for url in content_urls:
+                        if url not in source_links:
+                            source_links.append(url)
+                
+                # Format the source links section
+                source_links_text = ""
+                if source_links:
+                    source_links_text = "\n\nSOURCE LINKS:\n"
+                    for url in source_links:
+                        # Remove tracking parameters
+                        clean_url = url.split('?')[0] if '?' in url else url
+                        source_links_text += f"- {clean_url}\n"
+                
+                formatted_item = f"==== {source} ====\n\n{content}{source_links_text}\n\n"
                 
                 # Add articles if present
                 for article in item.get('articles', []):
                     if isinstance(article, dict):
                         article_title = article.get('title', 'Article')
                         article_content = article.get('content', '')
+                        article_url = article.get('url', '')
+                        
                         if article_content and len(article_content) > min_content_length:
-                            formatted_item += f"--- {article_title} ---\n{article_content}\n\n"
+                            article_text = f"--- {article_title} ---\n{article_content}\n"
+                            if article_url and not is_root_domain(article_url):
+                                article_text += f"URL: {article_url}\n"
+                            formatted_item += article_text + "\n"
                 
                 formatted_content.append(formatted_item)
         else:
             # Scale down content if it exceeds token limit
             scale_factor = available_chars / total_content_length
             logger.info(f"Scaling content by factor {scale_factor:.2f} to fit token limit")
+            
+            # Aim to include more important content with a higher minimum scale
+            min_scale_factor = 0.5  # Ensure we include at least 50% of content
+            scale_factor = max(scale_factor, min_scale_factor)  
             
             for item in processed_content:
                 # Skip items with no meaningful content
@@ -262,7 +393,7 @@ class SummaryGenerator:
                 scaled_length = int(item_length * scale_factor)
                 
                 # Ensure we include at least some of each item
-                min_scaled_length = min(500, item_length)
+                min_scaled_length = min(1000, item_length)  # Increased minimum to 1000 chars
                 scaled_length = max(scaled_length, min_scaled_length)
                 
                 # Truncate content to scaled length
@@ -270,22 +401,67 @@ class SummaryGenerator:
                 
                 # Format this item
                 source = item.get('source', 'Unknown Source')
-                formatted_item = f"==== {source} ====\n\n{truncated_content}\n\n"
+                
+                # Extract URLs from the content or item for "Read more" links
+                source_links = []
+                
+                # Try to find URLs in the item
+                if 'url' in item and item['url'] and not is_root_domain(item['url']):
+                    source_links.append(item['url'])
+                
+                # Get URLs from the item if we extracted them earlier
+                if 'urls' in item and item['urls']:
+                    for url in item['urls']:
+                        if url not in source_links and not is_root_domain(url):
+                            source_links.append(url)
+                            
+                # Check for URLs in articles
+                if 'articles' in item and isinstance(item['articles'], list):
+                    for article in item['articles']:
+                        if isinstance(article, dict) and 'url' in article and article['url']:
+                            article_url = article['url']
+                            if not is_root_domain(article_url) and article_url not in source_links:
+                                source_links.append(article_url)
+                
+                # Extract URLs from the content using regex
+                if isinstance(content, str):
+                    import re
+                    url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
+                    content_urls = re.findall(url_pattern, content)
+                    content_urls = filter_urls(content_urls)
+                    for url in content_urls:
+                        if url not in source_links:
+                            source_links.append(url)
+                
+                # Format the source links section
+                source_links_text = ""
+                if source_links:
+                    source_links_text = "\n\nSOURCE LINKS:\n"
+                    for url in source_links:
+                        # Remove tracking parameters
+                        clean_url = url.split('?')[0] if '?' in url else url
+                        source_links_text += f"- {clean_url}\n"
+                
+                formatted_item = f"==== {source} ====\n\n{truncated_content}{source_links_text}\n\n"
                 
                 # Scale and add articles if present
                 for article in item.get('articles', []):
                     if isinstance(article, dict):
                         article_title = article.get('title', 'Article')
                         article_content = article.get('content', '')
+                        article_url = article.get('url', '')
                         
                         if article_content and len(article_content) > min_content_length:
                             article_length = len(article_content)
                             article_scaled_length = int(article_length * scale_factor)
-                            article_min_length = min(300, article_length)
+                            article_min_length = min(500, article_length)  # Increased minimum
                             article_scaled_length = max(article_scaled_length, article_min_length)
                             
                             truncated_article = article_content[:article_scaled_length]
-                            formatted_item += f"--- {article_title} ---\n{truncated_article}\n\n"
+                            article_text = f"--- {article_title} ---\n{truncated_article}\n"
+                            if article_url and not is_root_domain(article_url):
+                                article_text += f"URL: {article_url}\n"
+                            formatted_item += article_text + "\n"
                 
                 formatted_content.append(formatted_item)
         
@@ -314,7 +490,7 @@ class SummaryGenerator:
         try:
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=4096,
+                max_tokens=self.max_tokens,  # Use value from config instead of hardcoding
                 system=prompt['system'],
                 messages=[
                     {"role": "user", "content": prompt['user']}
@@ -629,4 +805,4 @@ Please combine these summaries into a single coherent summary that:
             
         except Exception as e:
             logger.error(f"Error unwrapping tracking URL {url}: {e}", exc_info=True)
-            return None 
+            return None
