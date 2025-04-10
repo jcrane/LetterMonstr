@@ -86,11 +86,11 @@ def should_send_summary(config, force=False):
         delivery_minute
     )
     
-    # Check if we're past today's delivery time but before midnight
-    time_check = current_time >= todays_delivery_time and \
-                 current_time.date() == todays_delivery_time.date()
+    # Check if we're at or past today's delivery time but before tomorrow's delivery time
+    tomorrows_delivery_time = todays_delivery_time + timedelta(days=1)
+    time_check = current_time >= todays_delivery_time and current_time < tomorrows_delivery_time
     
-    logger.info(f"Time check result: {time_check} (comparing {current_time} with today's delivery time {todays_delivery_time})")
+    logger.info(f"Time check result: {time_check} (comparing {current_time} with delivery window {todays_delivery_time} to {tomorrows_delivery_time})")
     
     # Check if it's the right day based on frequency
     day_check = False
