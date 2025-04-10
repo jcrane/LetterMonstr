@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Force Generate Summary for Unsummarized Content - LetterMonstr.
+Force Generate Summary for All Content - LetterMonstr.
 
-This script forces generation of a summary for all unsummarized content items
-already in the database, and sends it immediately.
+This script forces generation of a summary for ALL content items
+in the database, bypassing deduplication checks.
 """
 
 import os
@@ -49,19 +49,28 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(os.path.join('data', 'force_new_for_unsummarized.log'))
+        logging.FileHandler(os.path.join('data', 'force_complete_summary.log'))
     ]
 )
 logger = logging.getLogger(__name__)
 
-def force_generate_for_unsummarized():
-    """Generate a new summary for all unsummarized content items."""
-    print("\nLetterMonstr - Force Generate Summary for Unsummarized Content")
-    print("==========================================================")
+# Create a modified ContentProcessor class that skips cross-summary deduplication
+class NoDedupeContentProcessor(ContentProcessor):
+    """Content processor that skips cross-summary deduplication."""
+    
+    def _filter_previously_summarized(self, items):
+        """Override to bypass cross-summary deduplication."""
+        logger.info(f"BYPASSING cross-summary deduplication for {len(items)} items - including ALL content")
+        return items
+
+def force_generate_complete_summary():
+    """Generate a new summary for ALL content items."""
+    print("\nLetterMonstr - Force Generate Complete Summary (No Deduplication)")
+    print("===============================================================")
     
     try:
-        # Initialize components
-        content_processor = ContentProcessor(config['content'])
+        # Initialize components with no deduplication processor
+        content_processor = NoDedupeContentProcessor(config['content'])
         summary_generator = SummaryGenerator(config['llm'])
         email_sender = EmailSender(config['summary'])
         
@@ -70,18 +79,18 @@ def force_generate_for_unsummarized():
         session = get_session(db_path)
         
         try:
-            # Query for all unsummarized content
-            unsummarized = session.query(ProcessedContent).filter_by(is_summarized=False).all()
+            # Get ALL processed content items
+            all_content = session.query(ProcessedContent).all()
             
-            if not unsummarized:
-                print("\nNo unsummarized content found in the database.")
+            if not all_content:
+                print("\nNo content found in the database.")
                 return
             
-            print(f"Found {len(unsummarized)} unsummarized content items.")
+            print(f"Found {len(all_content)} content items.")
             
             # Prepare content in the format expected by the summary generator
             processed_content = []
-            for item in unsummarized:
+            for item in all_content:
                 # Extract the processed content from JSON
                 try:
                     # Try to parse the processed_content JSON
@@ -90,7 +99,7 @@ def force_generate_for_unsummarized():
                     # If it's not valid JSON, use it as raw text
                     item_content = {
                         'source': item.source or "Untitled",
-                        'content': item.processed_content or item.raw_content,
+                        'content': item.processed_content,
                         'date': item.date_processed
                     }
                 
@@ -110,8 +119,8 @@ def force_generate_for_unsummarized():
                 
                 processed_content.append(item_content)
             
-            # Process content through the processor
-            print("Processing content for summarization...")
+            # Process content through our no-dedupe processor
+            print("Processing content for summarization (with deduplication DISABLED)...")
             processed_content = content_processor.process_and_deduplicate(processed_content)
             
             # Estimate token count (roughly 4 chars per token)
@@ -213,8 +222,8 @@ def force_generate_for_unsummarized():
                 
                 # Create summary record
                 new_summary = Summary(
-                    period_start=min(item.date_processed for item in unsummarized),
-                    period_end=max(item.date_processed for item in unsummarized),
+                    period_start=min(item.date_processed for item in all_content),
+                    period_end=max(item.date_processed for item in all_content),
                     summary_type="daily",
                     summary_text=summary_text,
                     creation_date=datetime.now(),
@@ -241,7 +250,7 @@ def force_generate_for_unsummarized():
                         new_summary.sent_date = datetime.now()
                         
                         # Mark all content as summarized
-                        for item in unsummarized:
+                        for item in all_content:
                             item.is_summarized = True
                         
                         # Commit all changes
@@ -267,4 +276,4 @@ def force_generate_for_unsummarized():
         print(f"Error: {str(e)}")
 
 if __name__ == "__main__":
-    force_generate_for_unsummarized() 
+    force_generate_complete_summary() 

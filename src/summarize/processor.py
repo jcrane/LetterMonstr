@@ -9,8 +9,10 @@ import difflib
 import os
 import hashlib
 from datetime import datetime, timedelta
+import copy
+import json
 
-from src.database.models import get_session, SummarizedContent
+from src.database.models import get_session, SummarizedContent, EmailContent
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +26,7 @@ class ContentProcessor:
         self.title_similarity_threshold = 0.95  # Raised to require very high title similarity
         self.db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 
                                 'data', 'lettermonstr.db')
-        self.cross_summary_lookback_days = 7  # Reduced from 14 to 7 days
+        self.cross_summary_lookback_days = 14  # Increased from 7 to 14 days for better deduplication
     
     def _generate_content_fingerprint(self, content):
         """Generate a fingerprint for content to use in deduplication.
@@ -45,105 +47,89 @@ class ContentProcessor:
         # Create a hash of the text
         return hashlib.md5(fingerprint_text.encode('utf-8')).hexdigest()
     
-    def process_and_deduplicate(self, content_items):
-        """Process and deduplicate content items.
+    def process_and_deduplicate(self, items):
+        """Process and deduplicate a list of content items."""
+        processed_items = []
         
-        Args:
-            content_items (list): List of content items to process.
-            
-        Returns:
-            list: List of deduplicated content items.
-        """
-        if not content_items:
+        # Early check for empty items
+        if not items:
+            logger.warning("No items to process")
             return []
-            
-        try:
-            # Log the starting count
-            logger.info(f"Starting deduplication of {len(content_items)} items")
-            
-            # Ensure all items have required fields
-            preprocessed_items = []
-            for item in content_items:
-                # Skip empty items
-                if not item:
-                    continue
-                    
-                # Make a copy to avoid modifying the original
-                item_copy = dict(item)
-                
-                # Ensure we have a source field
-                if 'source' not in item_copy or not item_copy['source']:
-                    item_copy['source'] = 'Unknown Source'
-                    
-                # Ensure we have content
-                if 'content' not in item_copy or not item_copy['content']:
-                    # Try to find content in other fields
-                    if 'text' in item_copy and item_copy['text']:
-                        item_copy['content'] = item_copy['text']
-                    elif 'raw_content' in item_copy and item_copy['raw_content']:
-                        item_copy['content'] = item_copy['raw_content']
-                    elif 'main_content' in item_copy and item_copy['main_content']:
-                        item_copy['content'] = item_copy['main_content']
-                    elif 'html' in item_copy and item_copy['html']:
-                        # Clean HTML to text
-                        from bs4 import BeautifulSoup
-                        soup = BeautifulSoup(item_copy['html'], 'html.parser')
-                        item_copy['content'] = soup.get_text(separator='\n')
-                    else:
-                        # No content found, try to use source or title as minimal content
-                        item_copy['content'] = item_copy.get('title', item_copy['source'])
-                        logger.warning(f"No content found for item: {item_copy['source']}")
-                
-                # Clean the content
-                content_type = item_copy.get('content_type', 'text')
-                item_copy['content'] = self.clean_content(item_copy['content'], content_type)
-                
-                # If content is very short, log a warning
-                if len(item_copy['content']) < 100:
-                    logger.warning(f"Very short content for source: {item_copy['source']}, length: {len(item_copy['content'])}")
-                
-                # Add additional fields if needed
-                if 'date' not in item_copy:
-                    item_copy['date'] = datetime.now()
-                    
-                # Add to preprocessed items if content is not empty
-                if item_copy['content'].strip():
-                    preprocessed_items.append(item_copy)
-            
-            # Generate content fingerprints for deduplication
-            fingerprinted_items = []
-            content_fingerprints = set()
-            
-            for item in preprocessed_items:
-                # Generate a fingerprint
-                fingerprint = self._generate_content_fingerprint(item['content'])
-                
-                # Check if this is a duplicate
-                if fingerprint in content_fingerprints:
-                    logger.debug(f"Skipping duplicate item: {item['source']}")
-                    continue
-                
-                # Store the fingerprint
-                content_fingerprints.add(fingerprint)
-                
-                # Add to deduplicated items
-                fingerprinted_items.append(item)
-            
-            # Log the results
-            original_count = len(content_items)
-            deduplicated_count = len(fingerprinted_items)
-            
-            logger.info(f"Deduplication: {original_count} original items → {deduplicated_count} deduplicated items")
-            logger.info(f"Preserved {deduplicated_count} unique items, merged {original_count - deduplicated_count} similar items")
-            
-            # Apply historical deduplication across summaries if needed
-            final_items = self._filter_previously_summarized(fingerprinted_items)
-            
-            return final_items
         
+        try:
+            logger.info(f"Processing {len(items)} items for summarization")
+            
+            # Process each item
+            for item in items:
+                processed_item = self._process_item(item)
+                
+                # Add DB ID if it was in the original item
+                if hasattr(item, 'id') and not hasattr(processed_item, 'id'):
+                    processed_item['db_id'] = item.id
+                    
+                if processed_item:
+                    processed_items.append(processed_item)
+                
+            # If this is a database object with email_id, retrieve original content
+            for item in processed_items:
+                if 'db_id' in item and isinstance(item, dict) and 'content' in item:
+                    item_content_length = len(item['content']) if isinstance(item['content'], str) else 0
+                    
+                    # If content is too short, try to get original email content
+                    if item_content_length < 1000 and hasattr(item, 'email_id'):
+                        try:
+                            # Get original email content from database
+                            session = get_session()
+                            email_contents = session.query(EmailContent).filter_by(email_id=item.email_id).all()
+                            session.close()
+                            
+                            # Use the largest content available
+                            if email_contents:
+                                best_content = None
+                                best_content_len = 0
+                                
+                                for content_record in email_contents:
+                                    content_text = content_record.content
+                                    if content_text and len(content_text) > best_content_len:
+                                        best_content = content_text
+                                        best_content_len = len(content_text)
+                                
+                                if best_content and best_content_len > item_content_length:
+                                    item['content'] = best_content
+                                    logger.info(f"Retrieved original email content: {best_content_len} chars")
+                        except Exception as e:
+                            logger.error(f"Error retrieving original email content: {e}")
+            
+            # Log the content length for each item
+            for i, item in enumerate(processed_items):
+                content = item.get('content', '')
+                content_length = len(content) if isinstance(content, str) else 0
+                logger.info(f"Item {i+1}: Content length = {content_length} chars")
+            
+            # Check if we have enough content
+            if not processed_items:
+                logger.warning("No content to process after processing step")
+                return []
+            
+            # Deduplicate the processed items
+            logger.info("Starting deduplication of {} items".format(len(processed_items)))
+            deduplicated_items = self._deduplicate_items(processed_items)
+            
+            # Log the results of deduplication
+            logger.info(f"Deduplication: {len(processed_items)} original items → {len(deduplicated_items)} deduplicated items")
+            merged_count = len(processed_items) - len(deduplicated_items)
+            logger.info(f"Preserved {len(deduplicated_items)} unique items, merged {merged_count} similar items")
+            
+            # Count sources
+            source_count = len(set(item.get('source', '') for item in deduplicated_items))
+            logger.info(f"After deduplication: {len(deduplicated_items)} unique items from {source_count} sources")
+            
+            return deduplicated_items
+            
         except Exception as e:
             logger.error(f"Error in process_and_deduplicate: {e}", exc_info=True)
-            return content_items[:10]  # Return at most 10 items in case of error
+            # Return empty list on error to avoid crashing the application
+            return []
     
     def _filter_previously_summarized(self, items):
         """Filter out content that has already been included in previous summaries."""
@@ -153,29 +139,21 @@ class ContentProcessor:
         # Open database session
         session = get_session(self.db_path)
         try:
-            # Get lookback date
-            lookback_date = datetime.now() - timedelta(days=self.cross_summary_lookback_days)
+            # Calculate date threshold for historical content
+            threshold_date = datetime.now() - timedelta(days=self.cross_summary_lookback_days)
             
-            # Get all content signatures from recent SENT summaries only
-            historical_signatures = session.query(SummarizedContent).join(
-                SummarizedContent.summary
-            ).filter(
-                SummarizedContent.date_summarized >= lookback_date,
-                SummarizedContent.summary.has(sent=True)  # Only from sent summaries
+            # Get all content fingerprints from recent summaries
+            historical_content = session.query(SummarizedContent).filter(
+                SummarizedContent.date_summarized >= threshold_date
             ).all()
             
-            logger.info(f"Found {len(historical_signatures)} historical content signatures for cross-summary deduplication")
+            logger.info(f"Found {len(historical_content)} historical content items from last {self.cross_summary_lookback_days} days")
             
-            # If no historical signatures, return all items
-            if not historical_signatures:
-                logger.info("No historical content found from sent summaries, using all items")
-                return items
-                
-            # Prepare historical data for comparison
-            historical_titles = [sig.content_title for sig in historical_signatures if sig.content_title]
-            historical_fingerprints = [sig.content_fingerprint for sig in historical_signatures if sig.content_fingerprint]
+            historical_fingerprints = [item.content_fingerprint for item in historical_content if item.content_fingerprint]
+            historical_titles = [item.content_title for item in historical_content if item.content_title]
+            historical_hashes = set([item.content_hash for item in historical_content if item.content_hash])
             
-            # Filter out items that are too similar to historical content
+            # Filter out content that has already been summarized
             filtered_items = []
             skipped_items = 0
             
@@ -185,9 +163,16 @@ class ContentProcessor:
                 if 'Fwd: ' in title:
                     title = title.split('Fwd: ', 1)[1]
                 
-                # Create content fingerprint
+                # Create content fingerprint and hash
                 content = item.get('content', '')
                 fingerprint = content[:1000] if content else ''  # Use first 1000 chars as fingerprint
+                content_hash = hashlib.md5((title + fingerprint[:100]).encode('utf-8')).hexdigest()
+                
+                # Check for exact hash match first (most reliable)
+                if content_hash in historical_hashes:
+                    logger.info(f"Skipping previously summarized content (exact hash match): {title}")
+                    skipped_items += 1
+                    continue
                 
                 # Check for title similarity with historical content
                 title_match = False
@@ -203,9 +188,10 @@ class ContentProcessor:
                         content_match = True
                         break
                 
-                # Only skip if BOTH title AND content are too similar to historical content
-                if title_match and content_match:
-                    logger.info(f"Skipping previously summarized content: {title}")
+                # Skip if BOTH title AND content are similar to historical content
+                # This is a more balanced deduplication approach requiring both matches
+                if (title_match and len(title) > 5) and content_match:
+                    logger.info(f"Skipping previously summarized content (title and content match): {title}")
                     skipped_items += 1
                     continue
                 
@@ -248,6 +234,11 @@ class ContentProcessor:
                 existing = session.query(SummarizedContent).filter_by(content_hash=content_hash).first()
                 if existing:
                     logger.debug(f"Content already tracked: {title}")
+                    # Update the existing record with the latest summary ID
+                    existing.summary_id = summary_id
+                    existing.date_summarized = datetime.now()
+                    session.add(existing)
+                    stored_count += 1
                     continue
                 
                 # Create signature record
@@ -261,6 +252,24 @@ class ContentProcessor:
                 
                 session.add(signature)
                 stored_count += 1
+                
+                # Store additional signatures for better deduplication
+                # Add a fingerprint based on just the first paragraph to catch similar content with slight modifications
+                if content and len(content) > 200:
+                    first_paragraph = content.split('\n\n')[0][:300]  # First paragraph, max 300 chars
+                    if len(first_paragraph) > 100:  # Only if it's substantial
+                        para_hash = hashlib.md5((title + first_paragraph).encode('utf-8')).hexdigest()
+                        # Check this variant doesn't already exist
+                        if not session.query(SummarizedContent).filter_by(content_hash=para_hash).first():
+                            para_signature = SummarizedContent(
+                                content_hash=para_hash,
+                                content_title=title,
+                                content_fingerprint=first_paragraph,
+                                summary_id=summary_id,
+                                date_summarized=datetime.now()
+                            )
+                            session.add(para_signature)
+                            stored_count += 1
             
             # Commit changes
             session.commit()
@@ -273,238 +282,229 @@ class ContentProcessor:
             session.close()
     
     def _process_item(self, item):
-        """Process a single content item."""
+        """Process a single item for summarization.
+        
+        Args:
+            item: Dict containing content to process
+            
+        Returns:
+            Processed item with cleaned text
+        """
         try:
-            # Extract main content
-            email_content = item.get('email_content', {})
-            crawled_content = item.get('crawled_content', [])
+            # Log the initial item for debugging
+            title = item.get('source', 'Unknown')
+            initial_content_length = 0
             
-            # Log the structure of email_content for debugging
-            logger.debug(f"Email content keys: {email_content.keys() if isinstance(email_content, dict) else 'not a dict'}")
+            if isinstance(item, dict):
+                # Standard dictionary input
+                if 'content' in item and isinstance(item['content'], str):
+                    initial_content_length = len(item['content'])
+            elif hasattr(item, 'processed_content') and hasattr(item, 'source'):
+                # This is a database ProcessedContent object
+                title = item.source
+                
+                # Use the get_processed_content method if available
+                if hasattr(item, 'get_processed_content'):
+                    db_content = item.get_processed_content()
+                    
+                    # Handle various return types from get_processed_content
+                    if isinstance(db_content, dict):
+                        # If it's a dictionary, we'll use it directly
+                        item = db_content
+                        if 'content' in item and isinstance(item['content'], str):
+                            initial_content_length = len(item['content'])
+                    elif isinstance(db_content, str):
+                        # If it's a raw string, use it as content
+                        initial_content_length = len(db_content)
+                        item = {
+                            'source': title,
+                            'content': db_content
+                        }
+                elif item.processed_content:
+                    # Fallback: Try to deserialize the content directly
+                    try:
+                        # Try to parse as JSON
+                        db_content = json.loads(item.processed_content)
+                        if isinstance(db_content, dict):
+                            item = db_content
+                            if 'content' in item and isinstance(item['content'], str):
+                                initial_content_length = len(item['content'])
+                        else:
+                            # Not a dict, use as raw content
+                            initial_content_length = len(item.processed_content)
+                            item = {
+                                'source': title,
+                                'content': item.processed_content
+                            }
+                    except (json.JSONDecodeError, TypeError):
+                        # Not JSON, use as raw content
+                        initial_content_length = len(item.processed_content)
+                        item = {
+                            'source': title,
+                            'content': item.processed_content
+                        }
+                    
+            logger.info(f"Processing item: {title} (initial content length: {initial_content_length})")
             
-            # Get text content from email
-            content_text = ''
-            if isinstance(email_content, dict):
-                # Try to extract content from the dictionary
-                if email_content.get('content'):
-                    # Direct content field
-                    content_text = email_content.get('content', '')
-                    logger.debug(f"Using direct content field, length: {len(content_text)}")
-                    
-                elif email_content.get('content_type') == 'html':
-                    # HTML content - extract and clean
-                    html_content = email_content.get('content', '')
-                    logger.debug(f"Processing HTML content, length: {len(html_content)}")
-                    
-                    if html_content:
-                        # Use BeautifulSoup to extract text from HTML
+            # Initialize with empty content if needed
+            if not item.get('content'):
+                item['content'] = ''
+            
+            # Check if we have direct content - prioritize HTML
+            direct_html = item.get('html', '')
+            direct_text = item.get('text', '')
+            
+            # If we have HTML content, extract text using BeautifulSoup
+            if direct_html and len(direct_html) > len(item['content']):
+                try:
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(direct_html, 'html.parser')
+                    extracted_text = soup.get_text(separator='\n', strip=True)
+                    if len(extracted_text) > len(item['content']):
+                        item['content'] = extracted_text
+                        logger.info(f"Using HTML content for {title}: {len(extracted_text)} chars")
+                except Exception as e:
+                    logger.warning(f"Error extracting text from HTML: {e}")
+                
+            # If we have plain text and it's longer than current content, use it
+            if direct_text and len(direct_text) > len(item['content']):
+                item['content'] = direct_text
+                logger.info(f"Using plain text content for {title}: {len(direct_text)} chars")
+                
+            # Check if we need to extract content from original_email
+            if not item['content'] or len(item['content']) < 100:
+                if 'original_email' in item and isinstance(item['original_email'], dict):
+                    email_content = item['original_email'].get('content', '')
+                    if isinstance(email_content, str) and len(email_content) > len(item['content']):
+                        item['content'] = email_content
+                        logger.info(f"Using original email content for {title}: {len(email_content)} chars")
+                        
+                    # Also check for HTML and text in original_email
+                    email_html = item['original_email'].get('html', '')
+                    if email_html and len(email_html) > len(item['content']):
                         try:
                             from bs4 import BeautifulSoup
-                            soup = BeautifulSoup(html_content, 'html.parser')
-                            # Remove script and style elements
-                            for script in soup(["script", "style"]):
-                                script.extract()
-                            # Get text
-                            content_text = soup.get_text(separator='\n')
-                            # Clean up whitespace
-                            content_text = '\n'.join(line.strip() for line in content_text.splitlines() if line.strip())
-                            logger.debug(f"Extracted text from HTML, length: {len(content_text)}")
+                            soup = BeautifulSoup(email_html, 'html.parser')
+                            extracted_text = soup.get_text(separator='\n', strip=True)
+                            if len(extracted_text) > len(item['content']):
+                                item['content'] = extracted_text
+                                logger.info(f"Using original email HTML for {title}: {len(extracted_text)} chars")
                         except Exception as e:
-                            logger.error(f"Error extracting text from HTML: {e}")
-                            content_text = html_content  # Use raw HTML if extraction fails
-                else:
-                    # Plain text content
-                    content_text = email_content.get('content', '')
-                    logger.debug(f"Using plain text content, length: {len(content_text)}")
+                            logger.warning(f"Error extracting text from email HTML: {e}")
             
-            # Check if we actually have content
-            if not content_text and isinstance(email_content, dict):
-                logger.warning(f"No content found in email content dictionary: {email_content.keys()}")
-                # Try alternative extraction method - deep search
-                for key, value in email_content.items():
-                    if isinstance(value, str) and len(value) > len(content_text):
-                        content_text = value
-                        logger.debug(f"Found larger content in key '{key}', length: {len(content_text)}")
+            # Check for articles
+            if 'articles' in item and isinstance(item['articles'], list):
+                combined_article_content = ""
+                for article in item['articles']:
+                    if isinstance(article, dict) and isinstance(article.get('content'), str):
+                        combined_article_content += "\n\n" + article.get('content', '')
                 
-                # If still no content, try any dict values recursively
-                if not content_text:
-                    def search_nested_dict(d, depth=0):
-                        if depth > 3:  # Limit recursion depth
-                            return None
-                            
-                        best_text = ''
-                        if isinstance(d, dict):
-                            for k, v in d.items():
-                                if isinstance(v, str) and len(v) > len(best_text):
-                                    best_text = v
-                                elif isinstance(v, (dict, list)):
-                                    nested_text = search_nested_dict(v, depth+1)
-                                    if nested_text and len(nested_text) > len(best_text):
-                                        best_text = nested_text
-                        elif isinstance(d, list):
-                            for item in d:
-                                nested_text = search_nested_dict(item, depth+1)
-                                if nested_text and len(nested_text) > len(best_text):
-                                    best_text = nested_text
-                        return best_text
-                    
-                    deep_content = search_nested_dict(email_content)
-                    if deep_content and len(deep_content) > len(content_text):
-                        content_text = deep_content
-                        logger.debug(f"Found content through deep search, length: {len(content_text)}")
+                if combined_article_content and len(combined_article_content) > 100:
+                    # If we have article content and it's substantial, add it to the main content
+                    if item['content']:
+                        item['content'] += "\n\n--- Articles ---\n" + combined_article_content
+                    else:
+                        item['content'] = combined_article_content
+                    logger.info(f"Added article content for {title}: {len(combined_article_content)} chars")
             
-            # Combine with crawled content
-            all_content = content_text
+            # Check for crawled content
+            if 'crawled_content' in item and isinstance(item['crawled_content'], list):
+                combined_crawled = ""
+                for content in item['crawled_content']:
+                    if isinstance(content, dict):
+                        if 'clean_content' in content and isinstance(content['clean_content'], str):
+                            combined_crawled += "\n\n" + content['clean_content']
+                        elif 'content' in content and isinstance(content['content'], str):
+                            combined_crawled += "\n\n" + content['content']
+                
+                if combined_crawled and len(combined_crawled) > 100:
+                    # If we have crawled content and it's substantial, add it to the main content
+                    if item['content']:
+                        item['content'] += "\n\n--- Crawled Content ---\n" + combined_crawled
+                    else:
+                        item['content'] = combined_crawled
+                    logger.info(f"Added crawled content for {title}: {len(combined_crawled)} chars")
             
-            # Add crawled content if available
-            article_contents = []
-            for article in crawled_content:
-                if not article.get('is_ad', False):
-                    article_text = f"\n\nARTICLE: {article.get('title', '')}\n{article.get('content', '')}"
-                    article_contents.append(article_text)
+            # If content is still too short after all checks, log a warning and try raw content
+            if not item['content'] or len(item['content']) < 50:
+                logger.warning(f"Very short content for {title}: {len(item['content'])} chars")
+                
+                # Last resort: check for raw_content
+                raw_content = item.get('raw_content', '')
+                if raw_content and len(raw_content) > len(item['content']):
+                    item['content'] = raw_content
+                    logger.info(f"Using raw content for {title}: {len(raw_content)} chars")
             
-            # Combine email content with crawled content
-            combined_content = content_text + "\n\n" + "\n\n".join(article_contents)
+            # Clean the content
+            item['content'] = self._clean_text(item['content'])
             
-            # Log the content length to debug
-            logger.debug(f"Combined content length: {len(combined_content)}")
-            if len(combined_content) < 50:  # Arbitrary threshold for meaningful content
-                logger.warning(f"Very short content for source: {item.get('source', '')}, length: {len(combined_content)}")
+            # Log the processed item size
+            logger.info(f"Processing item: {title} (content size: {len(item['content'])} chars)")
             
-            # Create processed item
-            processed_item = {
-                'source': item.get('source', ''),
-                'date': item.get('date', datetime.now()),
-                'content': combined_content,
-                'original_email': email_content,
-                'articles': crawled_content
-            }
-            
-            return processed_item
-            
+            return item
         except Exception as e:
             logger.error(f"Error processing item: {e}", exc_info=True)
-            return None
+            # Return the original item if processing fails
+            return item
     
-    def _deduplicate_content(self, items):
-        """Remove duplicate content across items while preserving unique articles."""
+    def _deduplicate_items(self, items):
+        """Deduplicate items based on content similarity."""
         if not items:
             return []
         
-        logger.info(f"Starting deduplication of {len(items)} items")
-        
-        # Extract titles and content for comparison
+        # First, let's deduplicate by exact title match
+        unique_by_title = {}
         for item in items:
-            # Extract a title from the source or content
-            source = item.get('source', '')
-            if 'Fwd: ' in source:
-                # Remove forwarding prefix if present
-                item['clean_title'] = source.split('Fwd: ', 1)[1]
-            else:
-                item['clean_title'] = source
+            title = item.get('source', '')
+            # Skip items with no title
+            if not title:
+                continue
+            
+            # If this title already exists, take the one with more content
+            if title in unique_by_title:
+                existing_content = unique_by_title[title].get('content', '')
+                new_content = item.get('content', '')
                 
-            # Create a "fingerprint" of the content using key sentences
-            content = item.get('content', '')
-            # Instead of just first 500 chars, extract meaningful sentences
-            if content:
-                sentences = content.split('.')
-                # Take first 3 sentences and 3 from middle if available
-                first_sentences = '. '.join(sentences[:3]) if len(sentences) >= 3 else content[:300]
-                mid_point = len(sentences) // 2
-                mid_sentences = '. '.join(sentences[mid_point:mid_point+3]) if len(sentences) > 6 else ""
-                item['content_fingerprint'] = first_sentences + " " + mid_sentences
+                existing_len = len(existing_content) if isinstance(existing_content, str) else 0
+                new_len = len(new_content) if isinstance(new_content, str) else 0
+                
+                # Keep the one with more content
+                if new_len > existing_len:
+                    unique_by_title[title] = item
             else:
-                item['content_fingerprint'] = ''
+                unique_by_title[title] = item
         
-        # First pass: More selective grouping by very similar titles
-        content_groups = []
-        
+        # Create a list of all content items as dictionaries for further processing
+        # Content items from unique_by_title plus any items without titles
+        deduplicated_items = list(unique_by_title.values())
         for item in items:
-            assigned_to_group = False
-            
-            for group in content_groups:
-                # For title matching, require both similar title AND similar content
-                title_match = self._is_similar_title(item['clean_title'], group[0]['clean_title'])
-                content_match = False
-                
-                # Only check content if titles match
-                if title_match:
-                    # Verify with content similarity
-                    content_match = self._is_similar(item['content_fingerprint'], group[0]['content_fingerprint'])
-                
-                # Only group if BOTH title and content match
-                if title_match and content_match:
-                    group.append(item)
-                    assigned_to_group = True
-                    logger.debug(f"Grouped by similarity: '{item['clean_title']}' with '{group[0]['clean_title']}'")
-                    break
-            
-            # If not assigned to any group, create a new group
-            if not assigned_to_group:
-                content_groups.append([item])
-        
-        # For each group, create a merged item
-        deduplicated_items = []
-        
-        # Count how many items were merged
-        merged_count = 0
-        preserved_count = 0
-        
-        for group in content_groups:
-            if len(group) == 1:
-                # Only one item in group, no deduplication needed
-                # Clean up our temporary fields
-                item = group[0]
-                if 'clean_title' in item:
-                    del item['clean_title']
-                if 'content_fingerprint' in item:
-                    del item['content_fingerprint']
+            title = item.get('source', '')
+            if not title:  # Add items without titles
                 deduplicated_items.append(item)
-                preserved_count += 1
+        
+        # Second pass: further deduplicate by content hashes
+        content_hash_map = {}
+        for item in deduplicated_items:
+            content = item.get('content', '')
+            if not content or not isinstance(content, str):
+                continue
+            
+            # Generate a hash of the first 1000 chars for comparison
+            content_sample = content[:1000]
+            content_hash = hashlib.md5(content_sample.encode('utf-8')).hexdigest()
+            
+            if content_hash in content_hash_map:
+                # If we already have this content, keep the longer version
+                existing_content = content_hash_map[content_hash].get('content', '')
+                existing_len = len(existing_content) if isinstance(existing_content, str) else 0
+                new_len = len(content) if isinstance(content, str) else 0
+                
+                if new_len > existing_len:
+                    content_hash_map[content_hash] = item
             else:
-                # Log that we're merging items
-                sources = [item['source'] for item in group]
-                logger.info(f"Merging similar content: {sources[0]} (and {len(sources)-1} others)")
-                merged_count += len(group) - 1  # Count items that were merged
-                
-                # Find the most comprehensive item (longest content)
-                most_comprehensive = max(group, key=lambda x: len(x['content']))
-                
-                # Create a merged item combining sources and articles
-                merged_item = most_comprehensive.copy()
-                
-                # Remove our temporary fields
-                if 'clean_title' in merged_item:
-                    del merged_item['clean_title']
-                if 'content_fingerprint' in merged_item:
-                    del merged_item['content_fingerprint']
-                
-                # Collect sources and articles from all items in the group
-                all_sources = [most_comprehensive['source']]
-                all_articles = most_comprehensive.get('articles', [])
-                
-                for item in group:
-                    if item != most_comprehensive:
-                        if item['source'] not in all_sources:
-                            all_sources.append(item['source'])
-                        
-                        # Add non-duplicate articles
-                        for article in item.get('articles', []):
-                            if not self._article_exists_in(article, all_articles):
-                                all_articles.append(article)
-                
-                # Update merged item
-                merged_item['sources'] = all_sources
-                merged_item['articles'] = all_articles
-                merged_item['is_merged'] = True
-                
-                deduplicated_items.append(merged_item)
+                content_hash_map[content_hash] = item
         
-        # Log metrics about deduplication
-        logger.info(f"Deduplication: {len(items)} original items → {len(deduplicated_items)} deduplicated items")
-        logger.info(f"Preserved {preserved_count} unique items, merged {merged_count} similar items")
-        
-        return deduplicated_items
+        return list(content_hash_map.values())
     
     def _is_similar(self, text1, text2):
         """Check if two text contents are similar."""

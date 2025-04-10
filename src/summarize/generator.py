@@ -11,11 +11,39 @@ import json
 from datetime import datetime
 from anthropic import Anthropic
 import hashlib
+import re
 
 from src.database.models import get_session, Summary, ProcessedContent
 from src.summarize.claude_summarizer import create_claude_prompt
 
 logger = logging.getLogger(__name__)
+
+# Define the system prompts for different summary formats
+LLM_SYSTEM_PROMPTS = {
+    'newsletter': """You are an expert email summarizer that creates comprehensive, detailed summaries of newsletter content. 
+Extract ALL key information, insights, and main points from the provided content.
+Do not omit or truncate important content - include all significant information.
+Organize the summary by category or topic, with clear headings.
+Be thorough, factual, objective, and comprehensive in your coverage.
+Include all important details, statistics, quotes, and unique information from each source.
+Your summary should be well-structured with proper headings, paragraphs, bullet points, and clear formatting.
+ALWAYS include "Read more" links with the original URLs for each article or section you summarize.
+Format "Read more" links as HTML: <a href="URL">Read more</a>
+Never abbreviate or simplify content to the point of information loss.
+Write in a professional, engaging style that retains the essence and depth of the original content.
+""",
+    'weekly': """You are an expert email summarizer that creates comprehensive weekly digests of newsletter content.
+Organize the summary by clear categories (Technology, Business, Science, etc.) with descriptive headings.
+For each item, include a thorough description covering ALL main points, key insights, and important details.
+Do not abbreviate or simplify to the point of information loss - capture the full depth of each article.
+Use clear hierarchical headings, properly formatted paragraphs, and bullet points for readability.
+Be thorough, factual, objective, and comprehensive in your coverage.
+ALWAYS include "Read more" links with the original URLs for each article or section you summarize.
+Format "Read more" links as HTML: <a href="URL">Read more</a>
+Write in a professional, engaging style that makes complex topics accessible without sacrificing detail.
+Never omit significant information - your summary should reflect the full depth and breadth of the original content.
+"""
+}
 
 class SummaryGenerator:
     """Generates summaries using Claude API."""
@@ -33,35 +61,70 @@ class SummaryGenerator:
             # Updated to work with newer Anthropic client
             self.client = Anthropic(api_key=self.api_key)
     
-    def generate_summary(self, processed_content):
-        """Generate a summary of processed content."""
-        if not processed_content:
-            logger.warning("No content to summarize")
-            return ""
+    def generate_summary(self, processed_content, format_preferences=None):
+        """Generate a summary of the processed content."""
+        logger.info(f"Generating summary for {len(processed_content)} content items")
         
-        try:
-            # Convert processed content to string format for the prompt
-            content_for_summary = self._prepare_content_for_summary(processed_content)
-            
-            # Create prompt for Claude
-            prompt = self._create_summary_prompt(content_for_summary)
-            
-            # Call Claude API to generate summary
-            summary_text = self._call_claude_api(prompt)
-            
-            # Store the summary in the database
-            summary_id = self._store_summary(summary_text, processed_content)
-            
-            # Store content signatures for future deduplication
-            from src.summarize.processor import ContentProcessor
-            content_processor = ContentProcessor({'ad_keywords': []})
-            content_processor.store_summarized_content(summary_id, processed_content)
-            
-            return summary_text
-            
-        except Exception as e:
-            logger.error(f"Error generating summary: {e}", exc_info=True)
-            return "Error generating summary. Please check logs for details."
+        # Prepare the content for summarization
+        prepared_content = self._prepare_content_for_summary(processed_content)
+        
+        # If there's no content, return an error message
+        if prepared_content.startswith("NO CONTENT"):
+            logger.error("No content available for summarization")
+            return {
+                "summary": prepared_content,
+                "title": "No Content Available",
+                "categories": [],
+                "key_points": []
+            }
+        
+        # Log content size
+        logger.info(f"Prepared content length: {len(prepared_content)} characters")
+        
+        # Get summary using LLM
+        format_prefs = format_preferences or {}
+        summary_format = format_prefs.get('format', 'newsletter')
+        
+        # Include day of week in prompt if it's a weekly format
+        day_context = ""
+        if summary_format == 'weekly':
+            today = datetime.today()
+            day_context = f"Today is {today.strftime('%A, %B %d')}. "
+        
+        # Generate summary with the LLM
+        system_prompt = LLM_SYSTEM_PROMPTS.get(summary_format, LLM_SYSTEM_PROMPTS['newsletter'])
+        
+        # For weekly summaries, add context about the day
+        if summary_format == 'weekly':
+            system_prompt = day_context + system_prompt
+        
+        # Adjust prompt based on content length
+        content_length = len(prepared_content)
+        token_estimate = content_length // 4  # Rough estimate of tokens
+        
+        # For very large content, adjust the prompt to request more concise summaries
+        if token_estimate > 10000:
+            system_prompt += f"\n\nNOTE: You are summarizing a very large amount of content ({content_length} characters). Focus on capturing ALL important information while maintaining readability."
+        
+        # Create the prompt for Claude
+        prompt = self._create_summary_prompt(prepared_content, system_prompt)
+        
+        # Call Claude API to generate summary
+        summary_text = self._call_claude_api(prompt)
+        
+        # Extract title, categories, and key points
+        title, categories, key_points = self._extract_metadata(summary_text)
+        
+        # Remove any placeholder or assistant-style text
+        summary_text = self._clean_summary(summary_text)
+        
+        # Return the summary and metadata
+        return {
+            "summary": summary_text,
+            "title": title,
+            "categories": categories,
+            "key_points": key_points
+        }
     
     def _prepare_content_for_summary(self, processed_content):
         """Prepare content for summarization with intelligent token management."""
@@ -80,292 +143,487 @@ class SummaryGenerator:
         # Count meaningful content items
         meaningful_items = 0
         
+        # Define problematic domains to filter out
+        problematic_domains = [
+            'beehiiv.com', 'media.beehiiv.com', 'link.mail.beehiiv.com',
+            'mailchimp.com', 'substack.com', 'bytebytego.com',
+            'sciencealert.com', 'leapfin.com', 'cutt.ly',
+            'genai.works', 'link.genai.works'
+        ]
+        
+        # Helper function to check if a URL is just a root domain (not a specific article)
+        def is_root_domain(url):
+            if not url or not isinstance(url, str):
+                return True
+                
+            # Parse the URL
+            from urllib.parse import urlparse
+            parsed_url = urlparse(url)
+            
+            # Check if it's just a root domain
+            return (not parsed_url.path or parsed_url.path == '/' or 
+                    parsed_url.path.lower() in ['/index.html', '/index.php', '/home'] or
+                    len(parsed_url.path) < 5)
+        
+        # Helper function to filter URLs
+        def filter_urls(urls):
+            if not urls:
+                return []
+                
+            filtered = []
+            for url in urls:
+                # Skip if not a string
+                if not isinstance(url, str):
+                    continue
+                    
+                # Skip if not http(s)
+                if not url.lower().startswith(('http://', 'https://')):
+                    continue
+                    
+                # Parse the URL
+                from urllib.parse import urlparse
+                parsed_url = urlparse(url)
+                
+                # Skip if it's a problematic domain and just a root
+                domain = parsed_url.netloc.lower()
+                if any(domain.endswith(prob) for prob in problematic_domains) and is_root_domain(url):
+                    logger.info(f"Filtering out root domain URL: {url}")
+                    continue
+                    
+                filtered.append(url)
+                
+            return filtered
+        
+        # First pass: Calculate total content length from all sources
         for item in processed_content:
+            item_total_length = 0
+            
+            # If item is a ProcessedContent object, use get_processed_content method to access content
+            if hasattr(item, 'get_processed_content'):
+                db_item = item.get_processed_content()
+                if isinstance(db_item, dict):
+                    item = db_item
+                elif isinstance(db_item, str) and len(db_item) > 100:
+                    # If we got a large string, use it directly as content
+                    item = {'content': db_item, 'source': item.source}
+            
+            # Check main content
             content = item.get('content', '')
-            if isinstance(content, str) and len(content) > min_content_length:
+            if isinstance(content, str):
+                item_total_length += len(content)
+            
+            # Check for raw HTML content which might be stored directly
+            html_content = item.get('html', '')
+            if isinstance(html_content, str) and len(html_content) > len(content):
+                item_total_length = max(item_total_length, len(html_content))
+                # Replace the content with HTML for better processing
+                if len(html_content) > 1000:  # Only if it's substantial HTML
+                    try:
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(html_content, 'html.parser')
+                        text_content = soup.get_text(separator='\n', strip=True)
+                        # Use the HTML text if it's longer/better than current content
+                        if len(text_content) > len(content):
+                            item['content'] = text_content
+                            logger.info(f"Extracted {len(text_content)} chars from HTML for item {item.get('source', 'Unknown')}")
+                    except Exception as e:
+                        logger.warning(f"Error extracting text from HTML: {e}")
+            
+            # Check original email content
+            if 'original_email' in item and isinstance(item['original_email'], dict):
+                email_content = item['original_email'].get('content', '')
+                if isinstance(email_content, str):
+                    item_total_length = max(item_total_length, len(email_content))
+                    
+                # Also check HTML in original email
+                email_html = item['original_email'].get('html', '')
+                if isinstance(email_html, str) and len(email_html) > 1000:
+                    try:
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(email_html, 'html.parser')
+                        email_text = soup.get_text(separator='\n', strip=True)
+                        if len(email_text) > len(item.get('content', '')):
+                            item['content'] = email_text
+                            logger.info(f"Using original email HTML content: {len(email_text)} chars")
+                    except Exception as e:
+                        logger.warning(f"Error extracting text from email HTML: {e}")
+            
+            # Check articles
+            for article in item.get('articles', []):
+                if isinstance(article, dict) and isinstance(article.get('content'), str):
+                    article_content = article.get('content', '')
+                    item_total_length += len(article_content)
+            
+            # If this item has meaningful content, count it
+            if item_total_length > min_content_length:
                 has_meaningful_content = True
-                total_content_length += len(content)
                 meaningful_items += 1
+                total_content_length += item_total_length
+                
+                # Extract any URLs from raw content for later use
+                if 'urls' not in item and isinstance(item.get('content', ''), str):
+                    try:
+                        import re
+                        url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
+                        content_urls = re.findall(url_pattern, item['content'])
+                        item['urls'] = filter_urls(content_urls)
+                    except Exception as e:
+                        logger.warning(f"Error extracting URLs from content: {e}")
+                        
+                # Extract URLs from articles if present
+                if 'articles' in item:
+                    for article in item['articles']:
+                        if isinstance(article, dict) and 'url' in article:
+                            article_url = article['url']
+                            # Add URL to item URLs if it's not a root domain
+                            if not is_root_domain(article_url):
+                                if 'urls' not in item:
+                                    item['urls'] = []
+                                if article_url not in item['urls']:
+                                    item['urls'].append(article_url)
         
         if not has_meaningful_content:
             logger.error("No meaningful content found in processed items")
             # Create a clear message about the empty content
             empty_message = "NO MEANINGFUL NEWSLETTER CONTENT TO SUMMARIZE\n\n"
-            
-            # Add details about what was received
             empty_message += f"Received {len(processed_content)} content items, but none contained meaningful text.\n"
             empty_message += "Content sources:\n"
-            
             for item in processed_content:
                 source = item.get('source', 'Unknown')
                 content_len = len(item.get('content', '')) if isinstance(item.get('content', ''), str) else 0
                 empty_message += f"- {source}: {content_len} characters\n"
-            
             return empty_message
         
         logger.info(f"Found {meaningful_items} meaningful content items with total length of {total_content_length} characters")
         
-        # Estimate tokens per character (approximation)
-        tokens_per_char = 0.25  # A rough estimate: ~4 characters per token for English
+        # Second pass: Format content for summary
+        # Calculate available tokens for each item
+        max_tokens = self.max_tokens  # Use value from config
+        token_margin = 1000  # Leave some margin for prompt and response
+        available_tokens = max_tokens - token_margin
         
-        # Target maximum tokens for the content portion (leaving room for instructions and other parts)
-        max_content_tokens = 180000  # Approximately 180K tokens for Claude 3.7 Sonnet
+        # Rough estimate: 1 token ≈ 4 characters on average
+        chars_per_token = 4
+        available_chars = available_tokens * chars_per_token
         
-        # Reserve tokens for instructions and overhead
-        reserved_tokens = 20000  # Reserve 20K tokens for instructions and other parts
-        
-        # Available tokens for content
-        available_tokens = max_content_tokens - reserved_tokens
-        
-        # Estimate total content size
-        total_chars = total_content_length
-        estimated_tokens = total_chars * tokens_per_char
-        
-        logger.info(f"Estimated content size: {total_chars} chars, ~{int(estimated_tokens)} tokens")
-        
-        # Calculate scaling factor if we need to reduce content
-        scaling_factor = 1.0
-        if estimated_tokens > available_tokens:
-            scaling_factor = available_tokens / estimated_tokens
-            logger.warning(f"Content too large, scaling down to {scaling_factor:.2f} of original size")
-        
-        # Add each content item with scaled sizes
-        for item in processed_content:
-            # Add basic item information
-            item_text = f"SOURCE: {item.get('source', 'Unknown')}\n"
-            
-            # Handle date which could be a string or datetime object
-            date_value = item.get('date', datetime.now())
-            if isinstance(date_value, str):
-                # If it's a string, just use it directly
-                item_text += f"DATE: {date_value}\n"
-            else:
-                # If it's a datetime object, format it
-                try:
-                    item_text += f"DATE: {date_value.strftime('%Y-%m-%d')}\n"
-                except Exception as e:
-                    # Fallback to current date if there's any error
-                    logger.warning(f"Error formatting date: {e}, using current date")
-                    item_text += f"DATE: {datetime.now().strftime('%Y-%m-%d')}\n"
-            
-            item_text += "\n"
-            
-            # If this is a merged item, include all sources
-            if item.get('is_merged', False) and 'sources' in item:
-                item_text += f"MERGED FROM SOURCES: {', '.join(item['sources'])}\n\n"
-            
-            # Add main content with intelligent size management
-            content = item.get('content', '')
-            content_size = len(content)
-            
-            # Calculate maximum allowed size for this content based on scaling
-            if scaling_factor < 1.0:
-                # Scale down content size based on its proportion of the total
-                max_content_chars = int(content_size * scaling_factor)
+        if total_content_length <= available_chars:
+            # If total content fits within token limit, include everything
+            for item in processed_content:
+                # Skip items with no meaningful content
+                content = item.get('content', '')
+                if not isinstance(content, str) or len(content) < min_content_length:
+                    continue
                 
-                # Ensure minimum reasonable size
-                max_content_chars = max(3000, max_content_chars)
+                # Format this item
+                source = item.get('source', 'Unknown Source')
                 
-                if content_size > max_content_chars:
-                    # Intelligent truncation - include beginning and end
-                    first_portion = content[:max_content_chars // 2]
-                    second_portion = content[-(max_content_chars // 2):]
-                    content = first_portion + "\n\n[...CONTENT ABBREVIATED...]\n\n" + second_portion
-                    logger.debug(f"Truncated content for '{item.get('source', 'Unknown')}' from {content_size} to {len(content)} chars")
-            
-            item_text += f"CONTENT:\n{content}\n\n"
-            
-            # Add source URLs if available - AFTER the content
-            email_content = item.get('original_email', {})
-            source_links = []
-            
-            # Check if there's a web version link in the email
-            if isinstance(email_content, dict) and 'links' in email_content:
-                for link in email_content.get('links', []):
-                    # Look for typical "View in browser" or "Web version" links
-                    title = link.get('title', '').lower()
-                    url = link.get('url', '')
-                    
-                    # Filter out tracking/redirect URLs
-                    if self._is_tracking_url(url):
-                        # Try to unwrap the tracking URL
-                        unwrapped_url = self._unwrap_tracking_url(url)
-                        if unwrapped_url:
-                            url = unwrapped_url
-                        else:
-                            logger.warning(f"Skipping tracking URL that couldn't be unwrapped: {url}")
-                            continue
+                # Extract URLs from the content or item for "Read more" links
+                source_links = []
+                
+                # Try to find URLs in the item
+                if 'url' in item and item['url'] and not is_root_domain(item['url']):
+                    source_links.append(item['url'])
+                
+                # Get URLs from the item if we extracted them earlier
+                if 'urls' in item and item['urls']:
+                    for url in item['urls']:
+                        if url not in source_links and not is_root_domain(url):
+                            source_links.append(url)
+                
+                # Check for URLs in articles
+                if 'articles' in item and isinstance(item['articles'], list):
+                    for article in item['articles']:
+                        if isinstance(article, dict) and 'url' in article and article['url']:
+                            article_url = article['url']
+                            if not is_root_domain(article_url) and article_url not in source_links:
+                                source_links.append(article_url)
+                
+                # Extract URLs from the content using regex
+                if isinstance(content, str):
+                    import re
+                    url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
+                    content_urls = re.findall(url_pattern, content)
+                    content_urls = filter_urls(content_urls)
+                    for url in content_urls:
+                        if url not in source_links:
+                            source_links.append(url)
+                
+                # Format the source links section
+                source_links_text = ""
+                if source_links:
+                    source_links_text = "\n\nSOURCE LINKS:\n"
+                    for url in source_links:
+                        # Remove tracking parameters
+                        clean_url = url.split('?')[0] if '?' in url else url
+                        source_links_text += f"- {clean_url}\n"
+                
+                formatted_item = f"==== {source} ====\n\n{content}{source_links_text}\n\n"
+                
+                # Add articles if present
+                for article in item.get('articles', []):
+                    if isinstance(article, dict):
+                        article_title = article.get('title', 'Article')
+                        article_content = article.get('content', '')
+                        article_url = article.get('url', '')
                         
-                    if url and ('web' in title or 'browser' in title or 'view' in title):
-                        source_links.append(f"WEB VERSION: {link.get('title', 'Web Version')} - {url}")
-                        break
-            
-            # Add article URLs
-            articles = item.get('articles', [])
-            for article in articles:
-                article_url = article.get('url', '')
-                article_title = article.get('title', '')
+                        if article_content and len(article_content) > min_content_length:
+                            article_text = f"--- {article_title} ---\n{article_content}\n"
+                            if article_url and not is_root_domain(article_url):
+                                article_text += f"URL: {article_url}\n"
+                            formatted_item += article_text + "\n"
                 
-                # Filter out tracking/redirect URLs or unwrap them
-                if self._is_tracking_url(article_url):
-                    # Try to unwrap the tracking URL
-                    unwrapped_url = self._unwrap_tracking_url(article_url)
-                    if unwrapped_url:
-                        article_url = unwrapped_url
-                    else:
-                        logger.warning(f"Skipping tracking URL for article '{article_title}': {article_url}")
-                        continue
-                    
-                if article_url and article_title:
-                    source_links.append(f"ARTICLE: {article_title} - {article_url}")
+                formatted_content.append(formatted_item)
+        else:
+            # Scale down content if it exceeds token limit
+            scale_factor = available_chars / total_content_length
+            logger.info(f"Scaling content by factor {scale_factor:.2f} to fit token limit")
             
-            # Add source links to the content
-            if source_links:
-                item_text += "SOURCE LINKS:\n" + "\n".join(source_links) + "\n"
+            # Aim to include more important content with a higher minimum scale
+            min_scale_factor = 0.5  # Ensure we include at least 50% of content
+            scale_factor = max(scale_factor, min_scale_factor)  
+            
+            for item in processed_content:
+                # Skip items with no meaningful content
+                content = item.get('content', '')
+                if not isinstance(content, str) or len(content) < min_content_length:
+                    continue
                 
-                # Also add a more explicit message about using these links for "Read more" links
-                item_text += "\nIMPORTANT: For the article summaries in this section, use the above URLs as 'Read more' links.\n"
-                item_text += "DO NOT use any tracking URLs that contain 'beehiiv', 'mailchimp', 'constantcontact', etc. Only use direct article URLs.\n"
-            
-            # Add to formatted content
-            formatted_content.append(item_text)
+                # Calculate scaled length for this item
+                item_length = len(content)
+                scaled_length = int(item_length * scale_factor)
+                
+                # Ensure we include at least some of each item
+                min_scaled_length = min(1000, item_length)  # Increased minimum to 1000 chars
+                scaled_length = max(scaled_length, min_scaled_length)
+                
+                # Truncate content to scaled length
+                truncated_content = content[:scaled_length]
+                
+                # Format this item
+                source = item.get('source', 'Unknown Source')
+                
+                # Extract URLs from the content or item for "Read more" links
+                source_links = []
+                
+                # Try to find URLs in the item
+                if 'url' in item and item['url'] and not is_root_domain(item['url']):
+                    source_links.append(item['url'])
+                
+                # Get URLs from the item if we extracted them earlier
+                if 'urls' in item and item['urls']:
+                    for url in item['urls']:
+                        if url not in source_links and not is_root_domain(url):
+                            source_links.append(url)
+                            
+                # Check for URLs in articles
+                if 'articles' in item and isinstance(item['articles'], list):
+                    for article in item['articles']:
+                        if isinstance(article, dict) and 'url' in article and article['url']:
+                            article_url = article['url']
+                            if not is_root_domain(article_url) and article_url not in source_links:
+                                source_links.append(article_url)
+                
+                # Extract URLs from the content using regex
+                if isinstance(content, str):
+                    import re
+                    url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
+                    content_urls = re.findall(url_pattern, content)
+                    content_urls = filter_urls(content_urls)
+                    for url in content_urls:
+                        if url not in source_links:
+                            source_links.append(url)
+                
+                # Format the source links section
+                source_links_text = ""
+                if source_links:
+                    source_links_text = "\n\nSOURCE LINKS:\n"
+                    for url in source_links:
+                        # Remove tracking parameters
+                        clean_url = url.split('?')[0] if '?' in url else url
+                        source_links_text += f"- {clean_url}\n"
+                
+                formatted_item = f"==== {source} ====\n\n{truncated_content}{source_links_text}\n\n"
+                
+                # Scale and add articles if present
+                for article in item.get('articles', []):
+                    if isinstance(article, dict):
+                        article_title = article.get('title', 'Article')
+                        article_content = article.get('content', '')
+                        article_url = article.get('url', '')
+                        
+                        if article_content and len(article_content) > min_content_length:
+                            article_length = len(article_content)
+                            article_scaled_length = int(article_length * scale_factor)
+                            article_min_length = min(500, article_length)  # Increased minimum
+                            article_scaled_length = max(article_scaled_length, article_min_length)
+                            
+                            truncated_article = article_content[:article_scaled_length]
+                            article_text = f"--- {article_title} ---\n{truncated_article}\n"
+                            if article_url and not is_root_domain(article_url):
+                                article_text += f"URL: {article_url}\n"
+                            formatted_item += article_text + "\n"
+                
+                formatted_content.append(formatted_item)
         
-        # Join all items with a separator
-        final_content = "\n\n" + "-" * 50 + "\n\n".join(formatted_content)
+        # Combine all formatted content
+        combined_content = "\n".join(formatted_content)
         
-        # Final safety check
-        final_size = len(final_content)
-        final_tokens = int(final_size * tokens_per_char)
-        logger.info(f"Final prepared content: {final_size} chars, ~{final_tokens} tokens")
+        # Log the final content length
+        logger.info(f"Prepared content for summary: {len(combined_content)} characters, ~{len(combined_content) // chars_per_token} tokens")
         
-        return final_content
+        return combined_content
     
-    def _create_summary_prompt(self, content):
-        """Create a prompt for Claude to generate a summary."""
-        instructions = """
-Follow these guidelines:
-1. MOST IMPORTANT: Be thorough and comprehensive - include ALL meaningful content, stories, and insights from the source material.
-2. Do not omit any significant articles, stories or topics from the newsletters.
-3. Focus on factual information and key insights.
-4. AGGRESSIVELY REMOVE DUPLICATES: Many articles will appear multiple times across different newsletters.
-   - When you see the same story covered in multiple sources, combine them into a SINGLE summary
-   - Identify articles with the same topic or subject matter even if the titles differ
-   - Look for identical or nearly identical content and only include it once
-   - Include all unique details, but don't repeat the same information
-   - Mention if an item was covered by multiple sources, but only summarize it once
-5. Organize information by topic, not by source.
-6. Remove any content that appears to be advertising or sponsored.
-7. Include important details like dates, statistics, and key findings.
-8. Present a balanced view without injecting your own opinions.
-9. Use proper HTML formatting for email:
-   - Use <h2> tags for main section headers (e.g., "AI NEWS AND UPDATES")
-   - Use <h3> tags for subsections
-   - Use <ul> and <li> tags for lists
-   - Use compact spacing - avoid excessive blank lines between sections
-   - Use <hr> tags to separate major sections
-10. For EACH article or story from the newsletters, include a brief summary - don't skip any articles.
-11. IMPORTANT LINK FORMATTING: 
-   - After each summarized article or story, include a "Read more" link to the original article
-   - Format each link as: <a href="ACTUAL_URL">Read more →</a>
-   - Use the article URLs from the SOURCE LINKS section at the end of each content block
-   - Each summarized item should have its own "Read more" link that points to its specific source
-   - Place these links right after each article summary with minimal spacing
-12. If you find yourself omitting content due to length, create a separate "ADDITIONAL STORIES" section rather than leaving items out completely.
-
-The summary should be thorough and detailed, prioritizing completeness over brevity.
-Make sure all "Read more" links are properly formatted as HTML <a> tags so they're clickable in the email.
-
-IMPORTANT: Format for proper HTML email display. DO include HTML formatting and ensure all links are properly formatted as <a href="url">link text</a>.
-"""
-        # Use the shared prompt generator with our specific instructions
-        return create_claude_prompt(instructions, content)
+    def _create_summary_prompt(self, content, system_prompt=None):
+        """Create a prompt for Claude summarization."""
+        # Use the provided system prompt or the default one
+        if not system_prompt:
+            system_prompt = LLM_SYSTEM_PROMPTS['newsletter']
+            
+        # Return a dictionary structure instead of calling create_claude_prompt
+        return {
+            "system": system_prompt,
+            "user": f"Please summarize the following newsletter content:\n\n{content}"
+        }
     
     def _call_claude_api(self, prompt):
-        """Call Claude API to generate summary."""
-        if not self.client:
-            logger.error("Claude API client not initialized, API key may be missing")
-            return "Error: Claude API not configured properly. Please check your API key."
-        
+        """Call Claude API to generate a summary."""
         try:
-            # Rate limiting - Claude may have rate limits
-            time.sleep(1)
-            
-            # Call Claude API with updated API format for newer Anthropic version
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
+                max_tokens=self.max_tokens,  # Use value from config instead of hardcoding
+                system=prompt['system'],
                 messages=[
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": prompt['user']}
                 ]
             )
             
-            # Extract and return the summary text
-            # Updated to match the newer response format
-            if hasattr(response, 'content') and len(response.content) > 0:
-                summary_text = response.content[0].text
-                return summary_text
-            else:
-                logger.error("Unexpected response format from Claude API")
-                return "Error: Unexpected response format from Claude API"
+            # Extract the summary from the response
+            summary = response.content[0].text
             
+            return summary
         except Exception as e:
             logger.error(f"Error calling Claude API: {e}", exc_info=True)
-            return f"Error generating summary: {str(e)}"
+            return "Error generating summary. Please check logs for details."
+    
+    def _extract_metadata(self, summary_text):
+        """Extract title, categories, and key points from the summary."""
+        title = "Newsletter Summary"
+        categories = []
+        key_points = []
+        
+        # Try to extract a title from the first line
+        lines = summary_text.split('\n')
+        if lines and lines[0].strip():
+            # Check if first line looks like a title (no period at end, relatively short)
+            first_line = lines[0].strip()
+            if len(first_line) < 100 and not first_line.endswith('.'):
+                title = first_line
+        
+        # Extract categories (headings)
+        category_pattern = r'(?:^|\n)#+\s+(.+?)(?:\n|$)'
+        category_matches = re.findall(category_pattern, summary_text)
+        if category_matches:
+            categories = [cat.strip() for cat in category_matches if cat.strip()]
+        
+        # Extract key points (bullet points)
+        bullet_pattern = r'(?:^|\n)[*\-•]\s+(.+?)(?:\n|$)'
+        bullet_matches = re.findall(bullet_pattern, summary_text)
+        if bullet_matches:
+            key_points = [point.strip() for point in bullet_matches if point.strip()]
+        
+        return title, categories, key_points
+    
+    def _clean_summary(self, summary_text):
+        """Clean up the summary text by removing any placeholder text or assistant-style responses."""
+        # Remove any "Here's a summary..." or "I've summarized..." phrases
+        prefixes_to_remove = [
+            "Here's a summary",
+            "I've summarized",
+            "Here is a summary",
+            "I have summarized",
+            "Below is a summary",
+            "The following is a summary"
+        ]
+        
+        for prefix in prefixes_to_remove:
+            if summary_text.startswith(prefix):
+                # Find the first paragraph break after the prefix
+                first_para_end = summary_text.find('\n\n', len(prefix))
+                if first_para_end > 0:
+                    summary_text = summary_text[first_para_end:].strip()
+                break
+                
+        return summary_text
     
     def _store_summary(self, summary_text, processed_content):
-        """Store the summary and mark content as summarized."""
-        if not summary_text or not processed_content:
-            return None
-            
-        # Open database session
+        """Store the summary in the database and mark content as summarized."""
+        logger.info("Storing summary in database")
+        
         session = get_session(self.db_path)
-        try:
-            # Create summary record
-            summary = Summary(
-                summary_type='daily',
-                summary_text=summary_text,
-                period_start=datetime.now(),
-                period_end=datetime.now(),
-                creation_date=datetime.now(),
-                sent=False
-            )
-            
-            session.add(summary)
-            session.flush()  # Get the ID
-            
-            # Update processed content records to mark them as summarized
-            content_hashes = []
-            for item in processed_content:
-                # Create content hash for lookup
-                content = item.get('content', '')
-                title = item.get('source', '')
-                content_hash = hashlib.md5((title + content[:100]).encode('utf-8')).hexdigest()
-                content_hashes.append(content_hash)
-            
-            # Update the processed content items
-            session.query(ProcessedContent).filter(
-                ProcessedContent.content_hash.in_(content_hashes)
-            ).update(
-                {
-                    'is_summarized': True,
-                    'summary_id': summary.id
-                },
-                synchronize_session=False
-            )
-            
-            # Commit changes
-            session.commit()
-            logger.info(f"Stored summary {summary.id} and marked {len(content_hashes)} content items as summarized")
-            
-            return summary.id
-            
-        except Exception as e:
-            logger.error(f"Error storing summary: {e}", exc_info=True)
-            session.rollback()
-            return None
-        finally:
-            session.close()
+        max_retries = 3
+        retry_count = 0
+        retry_delay = 1
+        
+        while retry_count <= max_retries:
+            try:
+                # Create a new summary entry
+                summary = Summary(
+                    content=summary_text,
+                    date_generated=datetime.now(),
+                    sent=False
+                )
+                
+                session.add(summary)
+                session.flush()  # Get the ID without committing
+                
+                # Mark the content items as summarized
+                content_ids = []
+                for item in processed_content:
+                    try:
+                        # Handle both ProcessedContent objects and dictionaries
+                        if hasattr(item, 'id'):
+                            item_id = item.id
+                        elif isinstance(item, dict) and 'id' in item:
+                            item_id = item['id']
+                        elif hasattr(item, 'db_id'):
+                            item_id = item.db_id
+                        else:
+                            logger.warning(f"Cannot identify ID for content item: {item}")
+                            continue
+                        
+                        # Update the ProcessedContent record
+                        content_item = session.query(ProcessedContent).get(item_id)
+                        if content_item:
+                            content_item.is_summarized = True
+                            content_item.summary_id = summary.id
+                            content_ids.append(item_id)
+                        else:
+                            logger.warning(f"ProcessedContent with ID {item_id} not found")
+                    except Exception as e:
+                        logger.error(f"Error updating ProcessedContent item: {e}")
+                
+                # Commit all the changes in a single transaction
+                session.commit()
+                logger.info(f"Summary stored with ID: {summary.id}, marked {len(content_ids)} content items as summarized")
+                return summary.id
+                
+            except Exception as e:
+                session.rollback()
+                retry_count += 1
+                
+                if "database is locked" in str(e) and retry_count <= max_retries:
+                    logger.warning(f"Database locked during summary storage, retrying in {retry_delay}s (attempt {retry_count}/{max_retries})")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    logger.error(f"Error storing summary: {e}", exc_info=True)
+                    break
+            finally:
+                if session:
+                    session.close()
+        
+        logger.error("Failed to store summary after multiple attempts")
+        return None
     
     def combine_summaries(self, summaries):
         """Combine multiple summaries into one comprehensive summary."""
@@ -380,9 +638,11 @@ IMPORTANT: Format for proper HTML email display. DO include HTML formatting and 
         for i, summary in enumerate(summaries):
             formatted_content += f"\n{'==='*20}\n{summary}\n{'==='*20}\n\n"
         
-        # Create instructions for combining summaries
-        instructions = """
-You are a newsletter summarization assistant for the LetterMonstr application.
+        try:
+            # Call Claude API with the combined prompt
+            logger.info(f"Combining {len(summaries)} summaries into one")
+            combined_prompt = {
+                "system": """You are a newsletter summarization assistant for the LetterMonstr application.
 Your task is to combine multiple newsletter summaries into one comprehensive summary.
 
 The summaries below are from different batches of newsletters that have been processed separately.
@@ -393,16 +653,9 @@ Please combine these summaries into a single coherent summary that:
 3. Preserves all important information from each summary
 4. Maintains a clear structure with section headers
 5. Keeps all relevant links
-6. Improves the overall flow and readability
-
-Please provide a single comprehensive and well-organized summary that combines all of the above information,
-eliminating redundancy while preserving all significant content and links.
-"""
-        
-        try:
-            # Call Claude API with the combined prompt
-            logger.info(f"Combining {len(summaries)} summaries into one")
-            combined_prompt = create_claude_prompt(instructions, formatted_content)
+6. Improves the overall flow and readability""",
+                "user": f"Please combine these newsletter summaries into one comprehensive summary:\n\n{formatted_content}"
+            }
             combined_summary = self._call_claude_api(combined_prompt)
             return combined_summary
         except Exception as e:
@@ -552,4 +805,4 @@ eliminating redundancy while preserving all significant content and links.
             
         except Exception as e:
             logger.error(f"Error unwrapping tracking URL {url}: {e}", exc_info=True)
-            return None 
+            return None

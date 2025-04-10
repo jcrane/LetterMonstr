@@ -14,6 +14,7 @@ import logging
 import schedule
 from datetime import datetime, timedelta
 from sqlalchemy import text
+import random
 
 # Add the project root to the Python path for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -85,11 +86,11 @@ def should_send_summary(config, force=False):
         delivery_minute
     )
     
-    # Check if we're past today's delivery time but before midnight
-    time_check = current_time >= todays_delivery_time and \
-                 current_time.date() == todays_delivery_time.date()
+    # Check if we're at or past today's delivery time but before tomorrow's delivery time
+    tomorrows_delivery_time = todays_delivery_time + timedelta(days=1)
+    time_check = current_time >= todays_delivery_time and current_time < tomorrows_delivery_time
     
-    logger.info(f"Time check result: {time_check} (comparing {current_time} with today's delivery time {todays_delivery_time})")
+    logger.info(f"Time check result: {time_check} (comparing {current_time} with delivery window {todays_delivery_time} to {tomorrows_delivery_time})")
     
     # Check if it's the right day based on frequency
     day_check = False
@@ -207,12 +208,117 @@ def generate_and_send_summary(force=False):
         session = get_session(db_path)
         
         try:
-            # First check if we have any unsent summaries
+            # First check if we have any unsent summaries that should be retried
+            current_time = datetime.now()
             unsent_summaries = session.query(Summary).filter_by(sent=False).order_by(Summary.id.desc()).all()
-            if unsent_summaries:
-                logger.info(f"Found {len(unsent_summaries)} existing unsent summaries")
             
-            # Get all unsummarized content
+            # Check if any of these summaries are ready for retry
+            retry_candidates = []
+            for summary in unsent_summaries:
+                # Skip if we've reached max retries
+                if summary.retry_count >= summary.max_retries:
+                    logger.warning(f"Summary {summary.id} has reached max retries ({summary.max_retries}). Last error: {summary.error_message}")
+                    continue
+                
+                # Calculate backoff time (exponential with jitter)
+                if summary.last_retry_time:
+                    # Exponential backoff: 5min, 10min, 20min, 40min, 80min
+                    backoff_minutes = 5 * (2 ** summary.retry_count)
+                    # Add some randomness (jitter) to prevent all retries happening at once
+                    jitter = random.randint(0, 60)  # 0-60 seconds of jitter
+                    backoff_seconds = backoff_minutes * 60 + jitter
+                    
+                    # Check if enough time has passed since the last retry
+                    time_since_last_retry = (current_time - summary.last_retry_time).total_seconds()
+                    if time_since_last_retry < backoff_seconds:
+                        logger.info(f"Summary {summary.id} will be retried after backoff period (retry {summary.retry_count+1}/{summary.max_retries}, waiting {backoff_seconds}s, elapsed {time_since_last_retry}s)")
+                        continue
+                
+                # This summary is ready for retry
+                retry_candidates.append(summary)
+            
+            if retry_candidates:
+                logger.info(f"Found {len(retry_candidates)} unsent summaries ready for retry")
+                
+                # Initialize components for sending
+                email_sender = EmailSender(config['summary'])
+                email_fetcher = EmailFetcher(config['email'])
+                
+                # Attempt to send each retry candidate
+                for summary in retry_candidates:
+                    logger.info(f"Retrying summary {summary.id} (attempt {summary.retry_count+1}/{summary.max_retries})")
+                    
+                    # Increment retry count and update last retry time
+                    summary.retry_count += 1
+                    summary.last_retry_time = current_time
+                    
+                    # Try to send the summary
+                    try:
+                        # Send the summary
+                        logger.info(f"Sending summary email (ID: {summary.id})...")
+                        result = email_sender.send_summary(summary.summary_text, summary.id)
+                        
+                        if result:
+                            logger.info(f"Summary email {summary.id} sent successfully on retry {summary.retry_count}")
+                            
+                            # Mark the summary as sent
+                            summary.sent = True
+                            summary.sent_date = current_time
+                            summary.error_message = None
+                            
+                            # Find unsummarized content associated with this time period
+                            if summary.period_start and summary.period_end:
+                                unsummarized = session.query(ProcessedContent).filter(
+                                    ProcessedContent.is_summarized == False,
+                                    ProcessedContent.date_processed >= summary.period_start,
+                                    ProcessedContent.date_processed <= summary.period_end
+                                ).all()
+                            else:
+                                # Fall back to all unsummarized content
+                                unsummarized = session.query(ProcessedContent).filter_by(is_summarized=False).all()
+                            
+                            # Mark all content as summarized
+                            for item in unsummarized:
+                                item.is_summarized = True
+                                item.summary_id = summary.id
+                            
+                            # Get message IDs for any emails associated with this content
+                            emails_to_mark = []
+                            for item in unsummarized:
+                                if item.email and item.email.message_id:
+                                    emails_to_mark.append({
+                                        'message_id': item.email.message_id,
+                                        'subject': item.email.subject,
+                                        'sender': item.email.sender,
+                                        'date': item.email.date_received
+                                    })
+                            
+                            # Mark emails as read in Gmail
+                            if emails_to_mark and config['email'].get('mark_read_after_summarization', True):
+                                email_fetcher.mark_emails_as_processed(emails_to_mark)
+                                logger.info(f"Marked {len(emails_to_mark)} emails as read in Gmail")
+                            
+                            # Commit all changes
+                            session.commit()
+                            logger.info("All database records updated after successful retry")
+                            
+                            # Return since we've successfully sent a summary
+                            return
+                        else:
+                            # Record the failure
+                            summary.error_message = "Failed to send email"
+                            session.commit()
+                            logger.error(f"Failed to send summary email {summary.id} on retry {summary.retry_count}")
+                    except Exception as e:
+                        # Record the error
+                        summary.error_message = str(e)[:500]  # Truncate long error messages
+                        session.commit()
+                        logger.error(f"Error sending summary {summary.id} on retry {summary.retry_count}: {e}", exc_info=True)
+            
+            # If we get here, either there were no retries or all retries failed
+            # Continue with creating a new summary if needed
+            
+            # Get fresh unsummarized content
             unsummarized = session.query(ProcessedContent).filter_by(is_summarized=False).all()
             
             # Get total count for debugging
@@ -303,256 +409,194 @@ def generate_and_send_summary(force=False):
                 # Generate summary
                 logger.info("Generating summary...")
                 
-                # Check if we need to batch the content
-                if estimated_tokens > TOKEN_BATCH_LIMIT:
-                    logger.info(f"Content too large ({estimated_tokens} tokens), splitting into batches...")
-                    
-                    # Sort content by date (newest first) to process most recent first
-                    sorted_content = sorted(final_content, key=lambda x: x.get('date', datetime.now()), reverse=True)
-                    
-                    batches = []
-                    current_batch = []
-                    current_batch_chars = 0
-                    
-                    # Create batches based on token estimates
-                    for item in sorted_content:
-                        item_chars = len(item.get('content', ''))
-                        item_tokens = item_chars // 4
+                try:
+                    # Check if we need to batch the content
+                    if estimated_tokens > TOKEN_BATCH_LIMIT:
+                        logger.info(f"Content too large ({estimated_tokens} tokens), splitting into batches...")
                         
-                        # If adding this item would exceed our limit, start a new batch
-                        if current_batch_chars // 4 + item_tokens > TOKEN_BATCH_LIMIT and current_batch:
-                            batches.append(current_batch)
-                            current_batch = [item]
-                            current_batch_chars = item_chars
-                        else:
-                            current_batch.append(item)
-                            current_batch_chars += item_chars
-                    
-                    # Add the last batch if it has items
-                    if current_batch:
-                        batches.append(current_batch)
-                    
-                    logger.info(f"Split content into {len(batches)} batches")
-                    
-                    # Generate summaries for each batch
-                    batch_summaries = []
-                    for i, batch in enumerate(batches):
-                        batch_tokens = sum(len(item.get('content', '')) for item in batch) // 4
-                        logger.info(f"Generating summary for batch {i+1}/{len(batches)} ({batch_tokens} tokens)...")
-                        try:
-                            batch_summary = summary_generator.generate_summary(batch)
-                            if batch_summary:
-                                batch_summaries.append(batch_summary)
-                                logger.info(f"Batch {i+1} summary generated successfully")
+                        # Sort content by date (newest first) to process most recent first
+                        sorted_content = sorted(final_content, key=lambda x: x.get('date', datetime.now()), reverse=True)
+                        
+                        batches = []
+                        current_batch = []
+                        current_batch_chars = 0
+                        
+                        # Create batches based on token estimates
+                        for item in sorted_content:
+                            item_chars = len(item.get('content', ''))
+                            item_tokens = item_chars // 4
+                            
+                            # If adding this item would exceed our limit, start a new batch
+                            if current_batch_chars // 4 + item_tokens > TOKEN_BATCH_LIMIT and current_batch:
+                                batches.append(current_batch)
+                                current_batch = [item]
+                                current_batch_chars = item_chars
                             else:
-                                logger.warning(f"Failed to generate summary for batch {i+1}")
-                        except Exception as e:
-                            logger.error(f"Error generating summary for batch {i+1}: {e}", exc_info=True)
-                            # Try with a smaller portion of the batch if possible
-                            if len(batch) > 1:
-                                logger.info(f"Attempting to generate summary with half of batch {i+1}...")
-                                half_size = len(batch) // 2
-                                try:
-                                    half_batch_summary = summary_generator.generate_summary(batch[:half_size])
-                                    if half_batch_summary:
-                                        batch_summaries.append(half_batch_summary)
-                                        logger.info(f"Generated summary for first half of batch {i+1}")
-                                    
-                                    # Try the second half too
-                                    second_half_summary = summary_generator.generate_summary(batch[half_size:])
-                                    if second_half_summary:
-                                        batch_summaries.append(second_half_summary)
-                                        logger.info(f"Generated summary for second half of batch {i+1}")
-                                except Exception as e2:
-                                    logger.error(f"Error generating summary for half of batch {i+1}: {e2}", exc_info=True)
-                    
-                    # Combine all batch summaries
-                    if batch_summaries:
-                        logger.info(f"Combining {len(batch_summaries)} batch summaries...")
-                        if len(batch_summaries) == 1:
-                            summary_text = batch_summaries[0]
+                                current_batch.append(item)
+                                current_batch_chars += item_chars
+                        
+                        # Add the last batch if it has items
+                        if current_batch:
+                            batches.append(current_batch)
+                        
+                        logger.info(f"Split content into {len(batches)} batches")
+                        
+                        # Generate summaries for each batch
+                        batch_summaries = []
+                        for i, batch in enumerate(batches):
+                            batch_tokens = sum(len(item.get('content', '')) for item in batch) // 4
+                            logger.info(f"Generating summary for batch {i+1}/{len(batches)} ({batch_tokens} tokens)...")
+                            try:
+                                batch_summary = summary_generator.generate_summary(batch)
+                                if batch_summary:
+                                    batch_summaries.append(batch_summary)
+                                    logger.info(f"Batch {i+1} summary generated successfully")
+                                else:
+                                    logger.warning(f"Failed to generate summary for batch {i+1}")
+                            except Exception as e:
+                                logger.error(f"Error generating summary for batch {i+1}: {e}", exc_info=True)
+                                # Try with a smaller portion of the batch if possible
+                                if len(batch) > 1:
+                                    logger.info(f"Attempting to generate summary with half of batch {i+1}...")
+                                    half_size = len(batch) // 2
+                                    try:
+                                        half_batch_summary = summary_generator.generate_summary(batch[:half_size])
+                                        if half_batch_summary:
+                                            batch_summaries.append(half_batch_summary)
+                                            logger.info(f"Generated summary for first half of batch {i+1}")
+                                        
+                                        # Try the second half too
+                                        second_half_summary = summary_generator.generate_summary(batch[half_size:])
+                                        if second_half_summary:
+                                            batch_summaries.append(second_half_summary)
+                                            logger.info(f"Generated summary for second half of batch {i+1}")
+                                    except Exception as e2:
+                                        logger.error(f"Error generating summary for half of batch {i+1}: {e2}", exc_info=True)
+                        
+                        # Combine all batch summaries
+                        if batch_summaries:
+                            logger.info(f"Combining {len(batch_summaries)} batch summaries...")
+                            if len(batch_summaries) == 1:
+                                summary_text = batch_summaries[0]
+                            else:
+                                # Use the dedicated method to combine summaries
+                                summary_text = summary_generator.combine_summaries(batch_summaries)
+                            logger.info("Combined summary created successfully")
                         else:
-                            # Use the dedicated method to combine summaries
-                            summary_text = summary_generator.combine_summaries(batch_summaries)
-                        logger.info("Combined summary created successfully")
+                            raise Exception("No batch summaries were generated")
                     else:
-                        logger.error("No batch summaries were generated")
+                        # Content is small enough to summarize in one call
+                        logger.info("Content size is within limits, generating summary in one call...")
+                        summary_text = summary_generator.generate_summary(final_content)
+                    
+                    if not summary_text:
+                        raise Exception("Failed to generate summary - empty result returned")
+                    
+                except Exception as e:
+                    # Create a new summary record with the error, but don't mark content as summarized
+                    error_message = f"Error generating summary: {str(e)}"
+                    logger.error(error_message)
+                    
+                    new_summary = Summary(
+                        period_start=min(item.date_processed for item in unsummarized),
+                        period_end=max(item.date_processed for item in unsummarized),
+                        summary_type=config['summary']['frequency'],
+                        summary_text=error_message,
+                        creation_date=datetime.now(),
+                        sent=False,
+                        is_forced=False,
+                        retry_count=0,
+                        last_retry_time=datetime.now(),
+                        error_message=str(e)[:500]  # Truncate long error messages
+                    )
+                    session.add(new_summary)
+                    session.commit()
+                    logger.info(f"Created failed summary {new_summary.id} for retry later")
+                    return
+                
+                # We have a valid summary text, create a new summary record
+                try:
+                    # Check if the summary indicates no meaningful content
+                    no_content_indicators = [
+                        "no meaningful content",
+                        "no newsletter content",
+                        "no content to summarize",
+                        "no emails contained",
+                        "no extractable content"
+                    ]
+                    
+                    # Check if the summary just indicates there's no content
+                    is_empty_summary = any(indicator in summary_text.lower() for indicator in no_content_indicators)
+                    
+                    # Also check if final content items have meaningful content
+                    has_meaningful_content = False
+                    min_content_length = 100  # Minimum characters for meaningful content
+                    
+                    for item in final_content:
+                        content = item.get('content', '')
+                        if isinstance(content, str) and len(content) > min_content_length:
+                            has_meaningful_content = True
+                            break
+                    
+                    if is_empty_summary or not has_meaningful_content:
+                        logger.warning("Not sending summary email as there is no meaningful content to summarize")
+                        # Update status but don't send email
+                        for item in unsummarized:
+                            item.is_summarized = True
+                        session.commit()
+                        logger.info(f"Marked {len(unsummarized)} empty content items as summarized without sending email")
                         return
-                else:
-                    # Content is small enough to summarize in one go
-                    logger.info("Content size is within limits, generating summary in one call...")
-                    summary_text = summary_generator.generate_summary(final_content)
-                
-                # Check if summary generation failed or returned an error message
-                if not summary_text:
-                    logger.error("Failed to generate summary - empty result returned")
-                    return
                     
-                # Check if the summary contains an error message
-                if summary_text.startswith("Error generating summary:"):
-                    logger.error(f"Summary generation returned an error: {summary_text}")
-                    return
-                
-                # Check if summary actually contains meaningful content
-                # Look for indication phrases that Claude uses when no content is found
-                no_content_indicators = [
-                    "I don't see any actual newsletter content",
-                    "no actual text",
-                    "appears to be empty",
-                    "content to summarize"
-                ]
-                
-                # Check if the summary just indicates there's no content
-                is_empty_summary = any(indicator in summary_text for indicator in no_content_indicators)
-                
-                # Also check if final content items have meaningful content
-                has_meaningful_content = False
-                min_content_length = 100  # Minimum characters for meaningful content
-                
-                for item in final_content:
-                    content = item.get('content', '')
-                    if isinstance(content, str) and len(content) > min_content_length:
-                        has_meaningful_content = True
-                        break
-                
-                if is_empty_summary or not has_meaningful_content:
-                    logger.warning("Not sending summary email as there is no meaningful content to summarize")
-                    # Update status but don't send email
-                    for item in unsummarized:
-                        item.is_summarized = True
-                    session.commit()
-                    logger.info(f"Marked {len(unsummarized)} empty content items as summarized without sending email")
-                    return
-                
-                # Create summary record
-                new_summary = Summary(
-                    period_start=min(item.date_processed for item in unsummarized),
-                    period_end=max(item.date_processed for item in unsummarized),
-                    summary_type=config['summary']['frequency'],
-                    summary_text=summary_text,
-                    creation_date=datetime.now(),
-                    sent=False,
-                    is_forced=False  # This is a scheduled summary, not forced
-                )
-                session.add(new_summary)
-                session.flush()  # To get the ID
-                
-                # Now add to our list of unsent summaries
-                unsent_summaries.append(new_summary)
-            
-            # At this point, we have at least one summary to send
-            # If we have multiple summaries, merge them
-            if len(unsent_summaries) > 1:
-                logger.info(f"Merging {len(unsent_summaries)} summaries into a single email")
-                
-                # Collect all summary texts, filtering out problematic ones
-                all_summary_texts = []
-                summary_ids = []
-                problematic_indicators = [
-                    "NO MEANINGFUL NEWSLETTER CONTENT TO SUMMARIZE",
-                    "No meaningful content",
-                    "I'm unable to provide a newsletter summary",
-                    "content to summarize",
-                    "The only information provided is a subject line"
-                ]
-                
-                # Sort summaries by creation date, newest first
-                sorted_summaries = sorted(unsent_summaries, key=lambda x: x.creation_date or datetime.now(), reverse=True)
-                
-                for summary in sorted_summaries:
-                    # Skip problematic summaries
-                    if any(indicator in summary.summary_text for indicator in problematic_indicators):
-                        logger.info(f"Skipping problematic summary ID {summary.id} - contains error messages")
-                        # Mark as sent so it doesn't get included again
-                        summary.sent = True
-                        summary.sent_date = datetime.now()
-                        continue
+                    # Create summary record
+                    new_summary = Summary(
+                        period_start=min(item.date_processed for item in unsummarized),
+                        period_end=max(item.date_processed for item in unsummarized),
+                        summary_type=config['summary']['frequency'],
+                        summary_text=summary_text,
+                        creation_date=datetime.now(),
+                        sent=False,
+                        is_forced=False,  # This is a scheduled summary, not forced
+                        retry_count=0,
+                        last_retry_time=datetime.now()
+                    )
+                    session.add(new_summary)
+                    session.flush()  # To get the ID
                     
-                    # Skip empty summaries
-                    if not summary.summary_text or len(summary.summary_text.strip()) < 100:
-                        logger.info(f"Skipping empty or very short summary ID {summary.id}")
-                        # Mark as sent so it doesn't get included again
-                        summary.sent = True
-                        summary.sent_date = datetime.now()
-                        continue
+                    # Store content signatures for deduplication in future summaries
+                    content_processor.store_summarized_content(new_summary.id, final_content)
                     
-                    all_summary_texts.append(summary.summary_text)
-                    summary_ids.append(summary.id)
-                
-                # If we've filtered out all summaries, bail out
-                if not all_summary_texts:
-                    logger.warning("After filtering, no valid summaries remain to send")
-                    session.commit()
-                    return
-                
-                # Create a merged summary with clear section headers
-                merged_summary = "# LetterMonstr Combined Newsletter Summary\n\n"
-                
-                for i, summary_text in enumerate(all_summary_texts):
-                    # Only add section headers if there's more than one summary
-                    if len(all_summary_texts) > 1:
-                        merged_summary += f"## Summary {i+1}\n\n"
+                    # Now try to send the summary immediately
+                    logger.info(f"Sending summary email (ID: {new_summary.id})...")
+                    result = email_sender.send_summary(summary_text, new_summary.id)
                     
-                    merged_summary += summary_text.strip()
-                    if i < len(all_summary_texts) - 1:
-                        merged_summary += "\n\n" + "-" * 40 + "\n\n"
-                
-                # Send the merged summary
-                logger.info("Sending merged summary email...")
-                result = email_sender.send_summary(merged_summary)
-                
-                if result:
-                    logger.info("Merged summary email sent successfully")
-                    
-                    # Mark all summaries as sent
-                    for summary in unsent_summaries:
-                        summary.sent = True
-                        summary.sent_date = datetime.now()
-                    
-                    # Mark all content as summarized
-                    for item in unsummarized:
-                        item.is_summarized = True
-                    
-                    # Mark emails as read in Gmail
-                    if emails_to_mark and config['email'].get('mark_read_after_summarization', True):
-                        email_fetcher.mark_emails_as_processed(emails_to_mark)
-                        logger.info(f"Marked {len(emails_to_mark)} emails as read in Gmail")
-                    
-                    # Commit all changes
-                    session.commit()
-                    logger.info("All database records updated")
-                else:
-                    logger.error("Failed to send merged summary email")
-            else:
-                # Only one summary to send
-                summary = unsent_summaries[0]
-                
-                # Send the summary
-                logger.info(f"Sending summary email (ID: {summary.id})...")
-                result = email_sender.send_summary(summary.summary_text, summary.id)
-                
-                if result:
-                    logger.info("Summary email sent successfully")
-                    
-                    # Mark the summary as sent
-                    summary.sent = True
-                    summary.sent_date = datetime.now()
-                    
-                    # Mark all content as summarized
-                    for item in unsummarized:
-                        item.is_summarized = True
-                    
-                    # Mark emails as read in Gmail
-                    if emails_to_mark and config['email'].get('mark_read_after_summarization', True):
-                        email_fetcher.mark_emails_as_processed(emails_to_mark)
-                        logger.info(f"Marked {len(emails_to_mark)} emails as read in Gmail")
-                    
-                    # Commit all changes
-                    session.commit()
-                    logger.info("All database records updated")
-                else:
-                    logger.error("Failed to send summary email")
-            
+                    if result:
+                        logger.info("Summary email sent successfully")
+                        
+                        # Mark the summary as sent
+                        new_summary.sent = True
+                        new_summary.sent_date = datetime.now()
+                        
+                        # Mark all content as summarized
+                        for item in unsummarized:
+                            item.is_summarized = True
+                            item.summary_id = new_summary.id
+                        
+                        # Mark emails as read in Gmail
+                        if emails_to_mark and config['email'].get('mark_read_after_summarization', True):
+                            email_fetcher.mark_emails_as_processed(emails_to_mark)
+                            logger.info(f"Marked {len(emails_to_mark)} emails as read in Gmail")
+                        
+                        # Commit all changes
+                        session.commit()
+                        logger.info("All database records updated")
+                    else:
+                        # The summary is created but sending failed - will be retried later
+                        new_summary.error_message = "Failed to send email"
+                        session.commit()
+                        logger.error("Failed to send summary email - will retry later")
+                except Exception as e:
+                    logger.error(f"Error creating or sending summary: {e}", exc_info=True)
+                    # Don't mark content as summarized so we can try again later
         finally:
             session.close()
             
@@ -647,25 +691,8 @@ def main():
         logger.info("Force flag detected, generating summary immediately")
         generate_and_send_summary(force=True)
         
-    # Set up periodic tasks
-    if config['email'].get('periodic_fetch', False):
-        logger.info("Scheduled fetch and process to run every hour")
-        schedule.every().hour.do(run_periodic_fetch)
-        
-    # Schedule summary check every 15 minutes
-    logger.info("Scheduled summary check to run every 15 minutes")
-    schedule.every(15).minutes.do(generate_and_send_summary)
-    
-    # Run initial fetch and process
-    run_periodic_fetch()
-    
-    # Run initial summary check
-    generate_and_send_summary()
-    
-    logger.info("Starting scheduler")
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
+    # Use the setup_scheduler function to handle all scheduling
+    setup_scheduler()
 
 if __name__ == "__main__":
     main() 

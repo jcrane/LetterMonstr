@@ -61,6 +61,9 @@ class WebCrawler:
         elif isinstance(links, dict) and 'url' in links:
             links = [links]
         
+        # Resolve redirects and get actual content URLs
+        links = self.get_content_urls(links)
+        
         # Limit the number of links to crawl
         if len(links) > self.max_links:
             logger.info(f"Limiting crawl to {self.max_links} of {len(links)} links")
@@ -309,62 +312,99 @@ class WebCrawler:
             return None
     
     def resolve_redirect(self, url):
-        """Follow redirects and return the final URL.
-        
-        This method makes a HEAD request (or GET if needed) to follow redirects
-        and return the final destination URL.
-        """
-        if not url:
-            return None
-            
+        """Follow redirects to get the actual destination URL."""
         try:
-            logger.info(f"Following redirects for URL: {url}")
-            
-            # Prepare headers with user agent
-            headers = {'User-Agent': self.user_agent}
-            
-            # Try with a HEAD request first (faster, doesn't download content)
-            try:
-                response = requests.head(
-                    url, 
-                    headers=headers,
-                    allow_redirects=True,
-                    timeout=self.timeout
-                )
+            # Skip non-HTTP URLs
+            if not url.lower().startswith(('http://', 'https://')):
+                return url
                 
-                # If successful, return the final URL
-                if response.status_code == 200:
-                    final_url = response.url
-                    if final_url != url:
-                        logger.info(f"Redirect followed: {url} -> {final_url}")
-                    return final_url
-            except Exception as e:
-                logger.debug(f"HEAD request failed for {url}: {e}")
+            # Check if this is a root domain without a path (excluding common homepage indicators)
+            parsed_url = urlparse(url)
+            if not parsed_url.path or parsed_url.path == '/' or parsed_url.path.lower() in ['/index.html', '/index.php', '/home']:
+                logger.info(f"Skipping root domain URL without specific content path: {url}")
+                return None  # Don't use bare domains as content links
                 
-            # If HEAD failed, try with GET
-            response = requests.get(
-                url, 
-                headers=headers,
-                allow_redirects=True,
-                timeout=self.timeout,
-                stream=True  # Don't download the entire content
-            )
+            # Also skip common newsletter/tracking domains with no specific content
+            problematic_domains = [
+                'beehiiv.com', 'media.beehiiv.com', 'link.mail.beehiiv.com',
+                'mailchimp.com', 'substack.com', 'bytebytego.com',
+                'sciencealert.com', 'leapfin.com', 'cutt.ly',
+                'genai.works', 'link.genai.works'
+            ]
             
-            # Close the connection before processing
-            response.close()
-            
-            # Get the final URL after redirects
-            final_url = response.url
+            if any(domain in parsed_url.netloc.lower() for domain in problematic_domains) and (not parsed_url.path or parsed_url.path == '/' or len(parsed_url.path) < 5):
+                logger.info(f"Skipping known newsletter/tracking domain without specific content: {url}")
+                return None
+                
+            # Send a HEAD request first to get the final URL after redirects
+            logger.info(f"Resolving URL: {url}")
+            head_response = requests.head(url, headers=self.headers, allow_redirects=True, timeout=self.timeout)
+            final_url = head_response.url
             
             if final_url != url:
-                logger.info(f"Redirect followed: {url} -> {final_url}")
+                logger.info(f"URL {url} redirected to {final_url}")
                 
-            return final_url
+                # Check if the final URL is also a root domain
+                final_parsed = urlparse(final_url)
+                if not final_parsed.path or final_parsed.path == '/' or final_parsed.path.lower() in ['/index.html', '/index.php', '/home']:
+                    logger.info(f"Redirect ended at root domain without specific content: {final_url}")
+                    return None  # Don't use bare domains as content links
+                
+                return final_url
+            return url
             
         except Exception as e:
-            logger.error(f"Error resolving redirect for {url}: {e}")
-            return url  # Return original URL if we can't resolve
+            logger.error(f"Error resolving URL {url}: {e}", exc_info=True)
+            return url
             
+    def get_content_urls(self, links):
+        """Process a list of links to get actual content URLs.
+        
+        Args:
+            links: List of link dictionaries or URLs
+            
+        Returns:
+            list: List of dictionaries with resolved URLs
+        """
+        result = []
+        
+        # Process each link
+        for link in links:
+            try:
+                # Extract URL from link object
+                if isinstance(link, dict) and 'url' in link:
+                    url = link['url']
+                    title = link.get('title', '')
+                elif isinstance(link, str):
+                    url = link
+                    title = ''
+                else:
+                    logger.warning(f"Invalid link format: {link}")
+                    continue
+                    
+                # Skip non-HTTP URLs
+                if not url.lower().startswith(('http://', 'https://')):
+                    continue
+                    
+                # Resolve redirects to get the actual content URL
+                resolved_url = self.resolve_redirect(url)
+                
+                # Skip if we couldn't get a valid content URL
+                if not resolved_url:
+                    continue
+                    
+                # Add to results
+                result.append({
+                    'url': resolved_url,
+                    'title': title,
+                    'original_url': url if resolved_url != url else None
+                })
+                
+            except Exception as e:
+                logger.error(f"Error processing link {link}: {e}", exc_info=True)
+                
+        return result
+    
     def _is_ad_content(self, content, title):
         """Check if content looks like an advertisement."""
         # Check title first - quicker

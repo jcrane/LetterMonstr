@@ -5,10 +5,12 @@ Database models for LetterMonstr application.
 import os
 import json
 import logging
+import time
 from datetime import datetime
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, ForeignKey, text, Float
 from sqlalchemy.orm import relationship, sessionmaker, declarative_base
 import sqlite3
+from sqlalchemy.exc import OperationalError
 
 # Using declarative_base from sqlalchemy.orm instead of sqlalchemy.ext.declarative which is deprecated
 Base = declarative_base()
@@ -107,6 +109,10 @@ class Summary(Base):
     sent = Column(Boolean, default=False)
     sent_date = Column(DateTime, nullable=True)
     is_forced = Column(Boolean, default=False)  # Indicates if this was a forced/on-demand summary
+    retry_count = Column(Integer, default=0)  # Number of retry attempts
+    last_retry_time = Column(DateTime, nullable=True)  # When the last retry was attempted
+    max_retries = Column(Integer, default=5)  # Maximum number of retry attempts
+    error_message = Column(Text, nullable=True)  # Store the most recent error message
 
 class ProcessedContent(Base):
     """Model for storing content that has been processed but not yet summarized."""
@@ -129,6 +135,34 @@ class ProcessedContent(Base):
     # Relationships
     summary = relationship("Summary", foreign_keys=[summary_id])
     
+    def get_processed_content(self):
+        """Retrieve the processed content, handling JSON serialization safely.
+        
+        Returns:
+            dict or str: The processed content, properly deserialized if stored as JSON
+        """
+        if not self.processed_content:
+            return {}
+            
+        # Try to deserialize JSON, but handle raw strings gracefully
+        try:
+            # First check if it's already a dict structure serialized to JSON
+            content_data = json.loads(self.processed_content)
+            
+            # Handle the special case of our direct content structure
+            if isinstance(content_data, dict) and 'content' in content_data and 'original_length' in content_data:
+                # This is our direct content structure
+                logger.info(f"Found direct content structure with {content_data.get('original_length', 0)} original chars")
+                # Return the content field directly if it's substantial
+                if len(content_data['content']) > 1000:
+                    return content_data['content']
+            
+            return content_data
+        except (json.JSONDecodeError, TypeError):
+            # Not JSON, return the raw content
+            logger.info(f"Returning raw content string: {len(self.processed_content)} chars")
+            return self.processed_content
+    
     def __repr__(self):
         return f"<ProcessedContent(id={self.id}, source='{self.source}', is_summarized={self.is_summarized})>"
 
@@ -149,58 +183,68 @@ class SummarizedContent(Base):
 # Add relationship to Summary model
 Summary.content_signatures = relationship("SummarizedContent", back_populates="summary")
 
-def init_db(db_path):
-    """Initialize the database."""
-    # Ensure data directory exists
+def get_engine(db_path=None):
+    """Create database engine with proper settings."""
+    if not db_path:
+        # Use default path
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        db_path = os.path.join(project_root, 'data', 'lettermonstr.db')
+    
+    # Ensure directory exists
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     
-    # First set the SQLite pragmas using direct connection
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    # Configure for better concurrency and performance
-    cursor.execute("PRAGMA journal_mode=WAL;")
-    cursor.execute("PRAGMA synchronous=NORMAL;")
-    cursor.execute("PRAGMA busy_timeout=120000;")  # 120 seconds (2 minutes)
-    cursor.execute("PRAGMA temp_store=MEMORY;")
-    cursor.execute("PRAGMA cache_size=-40000;")  # About 40MB
-    cursor.execute("PRAGMA foreign_keys=ON;")
-    conn.commit()
-    conn.close()
-    
-    # Create engine with improved connection settings for concurrent access
+    # Create engine with connection pool settings
     engine = create_engine(
-        f'sqlite:///{db_path}', 
-        connect_args={
-            "check_same_thread": False,
-            "timeout": 120  # 120 seconds timeout for locked database
-        },
-        isolation_level="SERIALIZABLE"  # Ensures transaction integrity
+        f'sqlite:///{db_path}',
+        connect_args={'timeout': 30},  # Increase timeout for locks
+        pool_recycle=3600,  # Recycle connections after 1 hour
+        pool_pre_ping=True  # Verify connections before use
     )
-    
-    # Create tables
-    Base.metadata.create_all(engine)
-    
-    # Create session factory
+    return engine
+
+def get_session(db_path=None):
+    """Get a database session with retry logic for lock errors."""
+    engine = get_engine(db_path)
     Session = sessionmaker(bind=engine)
     
-    return Session
+    # Initial attempt
+    max_retries = 5
+    retry_count = 0
+    retry_delay = 1  # Start with 1 second delay
+    
+    while retry_count < max_retries:
+        try:
+            return Session()
+        except OperationalError as e:
+            if "database is locked" in str(e) and retry_count < max_retries:
+                retry_count += 1
+                logger.warning(f"Database locked, retrying in {retry_delay} seconds (attempt {retry_count}/{max_retries})")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                # Re-raise if it's not a lock error or we've exhausted retries
+                logger.error(f"Database error after {retry_count} retries: {e}")
+                raise
+    
+    # If we get here, we've exhausted retries
+    raise OperationalError("Failed to acquire database connection after maximum retries", None, None)
 
-def get_session(db_path):
-    """Get a new database session."""
-    # Import text function here to avoid circular imports
-    from sqlalchemy import text
+def init_db(db_path):
+    """Initialize the database."""
+    engine = get_engine(db_path)
+    Base.metadata.create_all(engine)
     
-    Session = init_db(db_path)
-    session = Session()
+    logger.info(f"Database initialized at {db_path}")
     
-    # Double-check that settings are applied in this specific session
-    session.execute(text("PRAGMA journal_mode=WAL;"))  # Write-Ahead Logging for better concurrency
-    session.execute(text("PRAGMA synchronous=NORMAL;"))  # Faster with reasonable safety
-    session.execute(text("PRAGMA busy_timeout=120000;"))  # 120 seconds (2 minutes)
-    session.execute(text("PRAGMA temp_store=MEMORY;"))  # Keep temporary tables in memory
-    session.execute(text("PRAGMA cache_size=-40000;"))  # About 40MB for caching
-    session.execute(text("PRAGMA foreign_keys=ON;"))  # Enforce foreign key constraints
-    session.execute(text("PRAGMA locking_mode=NORMAL;"))  # Allow multiple readers
+    # Return the engine for session creation
+    return engine
+
+# Create tables if needed and return engine - for testing and initial setup
+def setup_db():
+    """Setup database for initial use."""
+    # Use the default path
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    db_path = os.path.join(project_root, 'data', 'lettermonstr.db')
     
-    return session 
+    # Initialize and return engine
+    return init_db(db_path) 
