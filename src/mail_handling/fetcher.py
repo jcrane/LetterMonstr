@@ -107,15 +107,30 @@ class EmailFetcher:
             # Calculate the date for the lookback period
             since_date = (datetime.now() - timedelta(days=self.lookback_days)).strftime("%d-%b-%Y")
             
+            logger.info(f"Looking for emails since {since_date} in folders: {self.folders}")
+            
             # Process each folder
             for folder in self.folders:
                 # Before each folder, ensure connection is still good
                 mail = self.check_connection(mail)
                 
                 # Select the mailbox/folder
-                mail.select(folder)
+                status, folder_info = mail.select(folder)
+                if status != 'OK':
+                    logger.error(f"Failed to select folder {folder}: {folder_info}")
+                    continue
+                    
+                # Log how many messages are in the folder total
+                message_count = int(folder_info[0])
+                logger.info(f"Folder {folder} contains {message_count} total messages")
                 
-                # Search for unread emails within the lookback period
+                # First, search for ALL emails within the lookback period to get a baseline
+                status, all_messages = mail.search(None, f'(SINCE {since_date})')
+                if status == 'OK':
+                    all_email_count = len(all_messages[0].split()) if all_messages[0] else 0
+                    logger.info(f"Found {all_email_count} total emails in {folder} since {since_date}")
+                
+                # Now search for unread emails within the lookback period
                 # Use UNSEEN flag to only get unread emails
                 status, messages = mail.search(None, f'(UNSEEN SINCE {since_date})')
                 
@@ -128,9 +143,40 @@ class EmailFetcher:
                 
                 if not email_ids:
                     logger.info(f"No unread emails found in folder {folder} since {since_date}")
-                    continue
+                    
+                    # If we don't find unread emails, try a different approach - ALL RECENT
+                    logger.info("Trying alternative search for recent emails...")
+                    status, recent_messages = mail.search(None, 'RECENT')
+                    
+                    if status == 'OK' and recent_messages[0]:
+                        recent_ids = recent_messages[0].split()
+                        logger.info(f"Found {len(recent_ids)} RECENT emails in {folder}")
+                        
+                        # Combine with our search
+                        email_ids = recent_ids
+                        
+                    # If still no emails, let's get the last 10 emails that aren't older than our lookback
+                    if not email_ids:
+                        logger.info("Trying to get the last 10 emails as fallback...")
+                        status, last_messages = mail.search(None, f'(SINCE {since_date})')
+                        
+                        if status == 'OK' and last_messages[0]:
+                            all_ids = last_messages[0].split()
+                            logger.info(f"Found {len(all_ids)} total emails in {folder} since {since_date}")
+                            
+                            # Take the last 10 messages (most recent)
+                            if len(all_ids) > 10:
+                                email_ids = all_ids[-10:]
+                                logger.info(f"Taking the 10 most recent emails for processing")
+                            else:
+                                email_ids = all_ids
+                                logger.info(f"Taking all {len(all_ids)} emails found for processing")
+                    
+                    if not email_ids:
+                        logger.warning(f"Still couldn't find any emails to process in {folder}")
+                        continue
                 
-                logger.info(f"Found {len(email_ids)} unread emails in folder {folder}")
+                logger.info(f"Processing {len(email_ids)} emails from folder {folder}")
                 
                 # Process each email
                 for e_id in email_ids:
@@ -148,6 +194,11 @@ class EmailFetcher:
                     # Parse the email message
                     msg = email_lib.message_from_bytes(msg_data[0][1])
                     
+                    # Get basic info for logging
+                    subject = self._decode_header(msg.get('Subject', 'No Subject'))
+                    sender = self._decode_header(msg.get('From', 'Unknown'))
+                    logger.info(f"Processing email: {subject} from {sender}")
+                    
                     # Check if this email was already processed in our database
                     message_id = msg.get('Message-ID', '')
                     if self._is_processed(session, message_id):
@@ -164,6 +215,8 @@ class EmailFetcher:
                         all_emails.append(parsed_email)
                         # Keep track of email IDs to mark as read later
                         processed_email_ids.append((e_id, parsed_email))
+                    else:
+                        logger.warning(f"Failed to parse email {subject} - skipping")
             
             # Close the connection
             try:
@@ -174,7 +227,7 @@ class EmailFetcher:
                 logger.warning(f"Error closing mail connection: {e}")
             
             # Return the list of fetched emails
-            logger.info(f"Successfully fetched {len(all_emails)} new unread emails for processing")
+            logger.info(f"Successfully fetched {len(all_emails)} new emails for processing")
             return all_emails
             
         except Exception as e:

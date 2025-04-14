@@ -110,35 +110,41 @@ def should_send_summary(config, force=False):
         logger.info(f"Not sending summary. time_check: {time_check}, day_check: {day_check}")
         return False
     
-    # Check if we've already sent a summary today (regardless of whether it was forced or not)
+    # Check if there's unsummarized content to send
     db_path = os.path.join(project_root, 'data', 'lettermonstr.db')
     session = get_session(db_path)
     try:
-        # Create date bounds for today
-        today_start = datetime(current_time.year, current_time.month, current_time.day, 0, 0, 0)
-        today_end = datetime(current_time.year, current_time.month, current_time.day, 23, 59, 59)
+        # Check if there are any unsummarized content items
+        unsummarized_count = session.query(ProcessedContent).filter_by(is_summarized=False).count()
+        logger.info(f"Found {unsummarized_count} unsummarized content items")
         
-        logger.info(f"Checking for summaries between {today_start} and {today_end}, only non-forced summaries")
+        if unsummarized_count > 0:
+            # There's unsummarized content, so we should send a summary
+            logger.info("Found unsummarized content, will send summary")
+            return True
+            
+        # If no unsummarized content, check if more than 24 hours have passed since last summary
+        latest_summary = session.query(Summary).filter(
+            Summary.sent == True
+        ).order_by(Summary.sent_date.desc()).first()
         
-        # Check if there's any summary sent today at the scheduled time
-        recent_summaries = session.query(Summary).filter(
-            Summary.sent == True,
-            Summary.sent_date >= today_start,
-            Summary.sent_date <= today_end,
-            Summary.is_forced == False  # Only look at scheduled summaries, not forced ones
-        ).order_by(Summary.creation_date.desc()).first()
-        
-        already_sent_today = recent_summaries is not None
-        
-        if already_sent_today:
-            logger.info(f"Found a non-forced summary sent today: ID {recent_summaries.id}, sent at {recent_summaries.sent_date}")
+        if latest_summary and latest_summary.sent_date:
+            hours_since_last_summary = (datetime.now() - latest_summary.sent_date).total_seconds() / 3600
+            logger.info(f"Hours since last summary: {hours_since_last_summary:.1f}")
+            
+            # Send a summary if it's been more than 24 hours since the last one
+            if hours_since_last_summary >= 24:
+                logger.info("More than 24 hours since last summary, will send a summary")
+                return True
         else:
-            logger.info("No non-forced summaries found sent today")
-        
-        logger.info(f"Already sent scheduled summary today: {already_sent_today}")
-        return not already_sent_today  # Send if we haven't already sent a scheduled summary today
+            # No summaries sent yet, so we should send one
+            logger.info("No summaries have been sent yet, will send a summary")
+            return True
+            
+        logger.info("No unsummarized content and recent summary exists, won't send summary")
+        return False
     except Exception as e:
-        logger.error(f"Error checking for existing summaries: {e}", exc_info=True)
+        logger.error(f"Error checking for content to summarize: {e}", exc_info=True)
         return False  # If there's an error, be cautious and don't send
     finally:
         session.close()
