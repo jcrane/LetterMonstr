@@ -96,7 +96,7 @@ class EmailFetcher:
             return self.connect()
     
     def fetch_new_emails(self):
-        """Fetch unread emails from the configured folders."""
+        """Fetch emails from the configured folders, including both unread and recent emails."""
         mail = self.connect()
         session = get_session(self.db_path)
         
@@ -124,62 +124,36 @@ class EmailFetcher:
                 message_count = int(folder_info[0])
                 logger.info(f"Folder {folder} contains {message_count} total messages")
                 
-                # First, search for ALL emails within the lookback period to get a baseline
-                status, all_messages = mail.search(None, f'(SINCE {since_date})')
-                if status == 'OK':
-                    all_email_count = len(all_messages[0].split()) if all_messages[0] else 0
-                    logger.info(f"Found {all_email_count} total emails in {folder} since {since_date}")
+                # First try to get all unread emails
+                status, unread_messages = mail.search(None, f'(UNSEEN SINCE {since_date})')
+                unread_ids = []
+                if status == 'OK' and unread_messages[0]:
+                    unread_ids = unread_messages[0].split()
+                    logger.info(f"Found {len(unread_ids)} unread emails in {folder}")
                 
-                # Now search for unread emails within the lookback period
-                # Use UNSEEN flag to only get unread emails
-                status, messages = mail.search(None, f'(UNSEEN SINCE {since_date})')
+                # Next get all recent emails (last 7 days)
+                status, recent_messages = mail.search(None, f'(SINCE {since_date})')
+                recent_ids = []
+                if status == 'OK' and recent_messages[0]:
+                    recent_ids = recent_messages[0].split()
+                    logger.info(f"Found {len(recent_ids)} total recent emails in {folder}")
                 
-                if status != 'OK':
-                    logger.warning(f"Failed to search folder {folder}: {messages}")
+                # Combine the IDs, ensuring no duplicates
+                all_ids = list(set(unread_ids + recent_ids))
+                
+                # If we have a lot of emails, just take the most recent ones
+                if len(all_ids) > 20:
+                    logger.info(f"Limiting to 20 most recent emails out of {len(all_ids)}")
+                    all_ids = sorted(all_ids, reverse=True)[:20]
+                
+                if not all_ids:
+                    logger.info(f"No emails found in folder {folder} since {since_date}")
                     continue
                 
-                # Get the list of email IDs
-                email_ids = messages[0].split()
-                
-                if not email_ids:
-                    logger.info(f"No unread emails found in folder {folder} since {since_date}")
-                    
-                    # If we don't find unread emails, try a different approach - ALL RECENT
-                    logger.info("Trying alternative search for recent emails...")
-                    status, recent_messages = mail.search(None, 'RECENT')
-                    
-                    if status == 'OK' and recent_messages[0]:
-                        recent_ids = recent_messages[0].split()
-                        logger.info(f"Found {len(recent_ids)} RECENT emails in {folder}")
-                        
-                        # Combine with our search
-                        email_ids = recent_ids
-                        
-                    # If still no emails, let's get the last 10 emails that aren't older than our lookback
-                    if not email_ids:
-                        logger.info("Trying to get the last 10 emails as fallback...")
-                        status, last_messages = mail.search(None, f'(SINCE {since_date})')
-                        
-                        if status == 'OK' and last_messages[0]:
-                            all_ids = last_messages[0].split()
-                            logger.info(f"Found {len(all_ids)} total emails in {folder} since {since_date}")
-                            
-                            # Take the last 10 messages (most recent)
-                            if len(all_ids) > 10:
-                                email_ids = all_ids[-10:]
-                                logger.info(f"Taking the 10 most recent emails for processing")
-                            else:
-                                email_ids = all_ids
-                                logger.info(f"Taking all {len(all_ids)} emails found for processing")
-                    
-                    if not email_ids:
-                        logger.warning(f"Still couldn't find any emails to process in {folder}")
-                        continue
-                
-                logger.info(f"Processing {len(email_ids)} emails from folder {folder}")
+                logger.info(f"Processing {len(all_ids)} emails from folder {folder}")
                 
                 # Process each email
-                for e_id in email_ids:
+                for e_id in all_ids:
                     # Before each email fetch, check connection again if we've processed a lot
                     if len(all_emails) > 0 and len(all_emails) % 10 == 0:
                         mail = self.check_connection(mail)
@@ -203,8 +177,6 @@ class EmailFetcher:
                     message_id = msg.get('Message-ID', '')
                     if self._is_processed(session, message_id):
                         logger.info(f"Skipping already processed email: {message_id}")
-                        # Mark as read in Gmail since we've already processed it
-                        mail.store(e_id, '+FLAGS', '\\Seen')
                         continue
                     
                     # Process the email
@@ -213,7 +185,7 @@ class EmailFetcher:
                     if parsed_email:
                         # Add to the list of emails to process
                         all_emails.append(parsed_email)
-                        # Keep track of email IDs to mark as read later
+                        # Keep track of email IDs for marking
                         processed_email_ids.append((e_id, parsed_email))
                     else:
                         logger.warning(f"Failed to parse email {subject} - skipping")
