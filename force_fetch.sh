@@ -25,19 +25,58 @@ echo ""
 echo -e "${YELLOW}Step 2: Forcing fetch and process...${NC}"
 echo ""
 
-# Call the Python fetch script directly with force flag
-python3 -c "
+# Create a temporary Python script that properly imports paths and modules
+cat > temp_force_fetch.py << 'EOF'
+#!/usr/bin/env python3
 import os
 import sys
+import logging
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger("force_fetch")
+
+# Add project root to path
 project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, project_root)
-from src.fetch_process import run_periodic_fetch, force_process_all_emails
-print('Running force fetch and process...')
-force_process_all_emails()
-"
 
-echo ""
-echo -e "${GREEN}Fetch and process completed. Check the database for results.${NC}"
+try:
+    logger.info("Importing force_process_all_emails function...")
+    from src.fetch_process import force_process_all_emails
+    
+    logger.info("Starting force fetch and process operation...")
+    result = force_process_all_emails()
+    
+    if result:
+        logger.info("Force fetch and process completed successfully!")
+    else:
+        logger.warning("Force fetch and process completed with warnings - check logs for details")
+        
+except Exception as e:
+    logger.error(f"Error during force fetch and process: {e}", exc_info=True)
+    sys.exit(1)
+EOF
+
+# Execute the temporary Python script
+python3 temp_force_fetch.py
+RESULT=$?
+
+# Clean up the temporary script
+rm temp_force_fetch.py
+
+# Check if the script ran successfully
+if [ $RESULT -eq 0 ]; then
+    echo ""
+    echo -e "${GREEN}Fetch and process completed. Check the database for results.${NC}"
+else
+    echo ""
+    echo -e "${RED}Force fetch and process encountered errors. Check the logs for details.${NC}"
+fi
+
 echo ""
 echo "To check the status and see how many emails were processed, run:"
 echo "./status_lettermonstr.sh"
