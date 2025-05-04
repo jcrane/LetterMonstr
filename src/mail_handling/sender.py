@@ -384,7 +384,7 @@ class EmailSender:
         except Exception as e:
             logger.error(f"Error cleaning HTML with BeautifulSoup: {e}")
             return html_content
-        
+    
     def _markdown_to_html(self, markdown_text):
         """Convert markdown-like text to clean HTML."""
         if not markdown_text:

@@ -350,7 +350,7 @@ class WebCrawler:
                     logger.info(f"Redirect ended at root domain without specific content: {final_url}")
                     return None  # Don't use bare domains as content links
                 
-                return final_url
+            return final_url
             return url
             
         except Exception as e:
@@ -404,7 +404,7 @@ class WebCrawler:
                 logger.error(f"Error processing link {link}: {e}", exc_info=True)
                 
         return result
-    
+            
     def _is_ad_content(self, content, title):
         """Check if content looks like an advertisement."""
         # Check title first - quicker

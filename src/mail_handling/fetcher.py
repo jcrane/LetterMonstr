@@ -119,7 +119,7 @@ class EmailFetcher:
                 if status != 'OK':
                     logger.error(f"Failed to select folder {folder}: {folder_info}")
                     continue
-                    
+                
                 # Log how many messages are in the folder total
                 message_count = int(folder_info[0])
                 logger.info(f"Folder {folder} contains {message_count} total messages")
