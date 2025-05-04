@@ -18,6 +18,7 @@ from sqlalchemy import text
 import random
 from sqlalchemy.exc import OperationalError
 
+
 # Add the project root to the Python path for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
@@ -470,62 +471,73 @@ def generate_and_send_summary(force=False, session=None):
                         item_chars = len(item.get('content', ''))
                         item_tokens = item_chars // 4
                         
-                        # If adding this item would exceed our limit, start a new batch
-                        if current_batch_chars // 4 + item_tokens > TOKEN_BATCH_LIMIT and current_batch:
-                            batches.append(current_batch)
-                            current_batch = [item]
-                            current_batch_chars = item_chars
-                        else:
-                            current_batch.append(item)
-                            current_batch_chars += item_chars
-                    
-                    # Add the last batch if it has items
-                    if current_batch:
-                        batches.append(current_batch)
-                    
-                    logger.info(f"Split content into {len(batches)} batches")
-                    
-                    # Generate summaries for each batch
-                    batch_summaries = []
-                    for i, batch in enumerate(batches):
-                        batch_tokens = sum(len(item.get('content', '')) for item in batch) // 4
-                        logger.info(f"Generating summary for batch {i+1}/{len(batches)} ({batch_tokens} tokens)...")
-                        try:
-                            batch_summary = summary_generator.generate_summary(batch)
-                            if batch_summary:
-                                batch_summaries.append(batch_summary)
-                                logger.info(f"Batch {i+1} summary generated successfully")
+                        batches = []
+                        current_batch = []
+                        current_batch_chars = 0
+                        
+                        # Create batches based on token estimates
+                        for item in sorted_content:
+                            item_chars = len(item.get('content', ''))
+                            item_tokens = item_chars // 4
+                            
+                            # If adding this item would exceed our limit, start a new batch
+                            if current_batch_chars // 4 + item_tokens > TOKEN_BATCH_LIMIT and current_batch:
+                                batches.append(current_batch)
+                                current_batch = [item]
+                                current_batch_chars = item_chars
                             else:
-                                logger.warning(f"Failed to generate summary for batch {i+1}")
-                        except Exception as e:
-                            logger.error(f"Error generating summary for batch {i+1}: {e}", exc_info=True)
-                            # Try with a smaller portion of the batch if possible
-                            if len(batch) > 1:
-                                logger.info(f"Attempting to generate summary with half of batch {i+1}...")
-                                half_size = len(batch) // 2
-                                try:
-                                    half_batch_summary = summary_generator.generate_summary(batch[:half_size])
-                                    if half_batch_summary:
-                                        batch_summaries.append(half_batch_summary)
-                                        logger.info(f"Generated summary for first half of batch {i+1}")
-                                    
-                                    # Try the second half too
-                                    second_half_summary = summary_generator.generate_summary(batch[half_size:])
-                                    if second_half_summary:
-                                        batch_summaries.append(second_half_summary)
-                                        logger.info(f"Generated summary for second half of batch {i+1}")
-                                except Exception as e2:
-                                    logger.error(f"Error generating summary for half of batch {i+1}: {e2}", exc_info=True)
-                    
-                    # Combine all batch summaries
-                    if batch_summaries:
-                        logger.info(f"Combining {len(batch_summaries)} batch summaries...")
-                        if len(batch_summaries) == 1:
-                            summary_text = batch_summaries[0]
+                                current_batch.append(item)
+                                current_batch_chars += item_chars
+                        
+                        # Add the last batch if it has items
+                        if current_batch:
+                            batches.append(current_batch)
+                        
+                        logger.info(f"Split content into {len(batches)} batches")
+                        
+                        # Generate summaries for each batch
+                        batch_summaries = []
+                        for i, batch in enumerate(batches):
+                            batch_tokens = sum(len(item.get('content', '')) for item in batch) // 4
+                            logger.info(f"Generating summary for batch {i+1}/{len(batches)} ({batch_tokens} tokens)...")
+                            try:
+                                batch_summary = summary_generator.generate_summary(batch)
+                                if batch_summary:
+                                    batch_summaries.append(batch_summary)
+                                    logger.info(f"Batch {i+1} summary generated successfully")
+                                else:
+                                    logger.warning(f"Failed to generate summary for batch {i+1}")
+                            except Exception as e:
+                                logger.error(f"Error generating summary for batch {i+1}: {e}", exc_info=True)
+                                # Try with a smaller portion of the batch if possible
+                                if len(batch) > 1:
+                                    logger.info(f"Attempting to generate summary with half of batch {i+1}...")
+                                    half_size = len(batch) // 2
+                                    try:
+                                        half_batch_summary = summary_generator.generate_summary(batch[:half_size])
+                                        if half_batch_summary:
+                                            batch_summaries.append(half_batch_summary)
+                                            logger.info(f"Generated summary for first half of batch {i+1}")
+                                        
+                                        # Try the second half too
+                                        second_half_summary = summary_generator.generate_summary(batch[half_size:])
+                                        if second_half_summary:
+                                            batch_summaries.append(second_half_summary)
+                                            logger.info(f"Generated summary for second half of batch {i+1}")
+                                    except Exception as e2:
+                                        logger.error(f"Error generating summary for half of batch {i+1}: {e2}", exc_info=True)
+                        
+                        # Combine all batch summaries
+                        if batch_summaries:
+                            logger.info(f"Combining {len(batch_summaries)} batch summaries...")
+                            if len(batch_summaries) == 1:
+                                summary_text = batch_summaries[0]
+                            else:
+                                # Use the dedicated method to combine summaries
+                                summary_text = summary_generator.combine_summaries(batch_summaries)
+                            logger.info("Combined summary created successfully")
                         else:
-                            # Use the dedicated method to combine summaries
-                            summary_text = summary_generator.combine_summaries(batch_summaries)
-                        logger.info("Combined summary created successfully")
+                            raise Exception("No batch summaries were generated")
                     else:
                         raise Exception("No batch summaries were generated")
                 else:
@@ -639,11 +651,11 @@ def generate_and_send_summary(force=False, session=None):
                     for item in unsummarized:
                         item.is_summarized = True
                         item.summary_id = new_summary.id
+
                     
-                    # Mark emails as read in Gmail
-                    if emails_to_mark and config['email'].get('mark_read_after_summarization', True):
-                        email_fetcher.mark_emails_as_processed(emails_to_mark)
-                        logger.info(f"Marked {len(emails_to_mark)} emails as read in Gmail")
+                    # Now try to send the summary immediately
+                    logger.info(f"Sending summary email (ID: {new_summary.id})...")
+                    result = email_sender.send_summary(summary_text, new_summary.id)
                     
                     # Commit all changes
                     session.commit()

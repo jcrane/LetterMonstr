@@ -351,6 +351,7 @@ class WebCrawler:
                     return None  # Don't use bare domains as content links
                 
             return final_url
+
             return url
             
         except Exception as e:
@@ -404,7 +405,50 @@ class WebCrawler:
                 logger.error(f"Error processing link {link}: {e}", exc_info=True)
                 
         return result
+
             
+        Returns:
+            list: List of dictionaries with resolved URLs
+        """
+        result = []
+        
+        # Process each link
+        for link in links:
+            try:
+                # Extract URL from link object
+                if isinstance(link, dict) and 'url' in link:
+                    url = link['url']
+                    title = link.get('title', '')
+                elif isinstance(link, str):
+                    url = link
+                    title = ''
+                else:
+                    logger.warning(f"Invalid link format: {link}")
+                    continue
+                    
+                # Skip non-HTTP URLs
+                if not url.lower().startswith(('http://', 'https://')):
+                    continue
+                    
+                # Resolve redirects to get the actual content URL
+                resolved_url = self.resolve_redirect(url)
+                
+                # Skip if we couldn't get a valid content URL
+                if not resolved_url:
+                    continue
+                    
+                # Add to results
+                result.append({
+                    'url': resolved_url,
+                    'title': title,
+                    'original_url': url if resolved_url != url else None
+                })
+                
+            except Exception as e:
+                logger.error(f"Error processing link {link}: {e}", exc_info=True)
+                
+        return result
+    
     def _is_ad_content(self, content, title):
         """Check if content looks like an advertisement."""
         # Check title first - quicker
