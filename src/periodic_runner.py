@@ -617,31 +617,60 @@ def generate_and_send_summary(force=False, session=None):
                     session.commit()
                     logger.info(f"Marked {len(unsummarized)} empty content items as summarized without sending email")
                     return
-                
-                # Create summary record
-                new_summary = Summary(
-                    period_start=min(item.date_processed for item in unsummarized),
-                    period_end=max(item.date_processed for item in unsummarized),
-                    summary_type=config['summary']['frequency'],
-                    summary_text=summary_text,
-                    creation_date=datetime.now(),
-                    sent=False,
-                    is_forced=False,  # This is a scheduled summary, not forced
-                    retry_count=0,
-                    last_retry_time=datetime.now()
-                )
-                session.add(new_summary)
-                session.flush()  # To get the ID
-                
-                # Store content signatures for deduplication in future summaries
-                content_processor.store_summarized_content(new_summary.id, final_content)
-                
-                # Now try to send the summary immediately
-                logger.info(f"Sending summary email (ID: {new_summary.id})...")
-                result = email_sender.send_summary(summary_text, new_summary.id)
-                
-                if result:
-                    logger.info("Summary email sent successfully")
+               
+                # We have a valid summary text, create a new summary record
+                try:
+                    # Check if the summary indicates no meaningful content
+                    no_content_indicators = [
+                        "no meaningful content",
+                        "no newsletter content",
+                        "no content to summarize",
+                        "no emails contained",
+                        "no extractable content"
+                    ]
+                    
+                    # If summary_text is a dictionary (from Claude API response), extract the actual text
+                    if isinstance(summary_text, dict):
+                        logger.info("Summary returned as dictionary, extracting text content")
+                        if 'summary' in summary_text:
+                            summary_text = summary_text['summary']
+                        elif 'content' in summary_text:
+                            summary_text = summary_text['content']
+                        else:
+                            # Convert the entire dict to a string as fallback
+                            summary_text = str(summary_text)
+
+                    # Ensure summary_text is a string
+                    if not isinstance(summary_text, str):
+                        summary_text = str(summary_text)
+                        logger.info(f"Converted non-string summary to string: {type(summary_text)}")
+
+                    # Check if the summary just indicates there's no content
+                    try:
+                        is_empty_summary = any(indicator in summary_text.lower() for indicator in no_content_indicators)
+                    except Exception as e:
+                        logger.error(f"Error checking if summary is empty: {e}, summary_text type: {type(summary_text)}")
+                        # If we can't check, assume it's not empty
+                        is_empty_summary = False
+                    
+                    # Also check if final content items have meaningful content
+                    has_meaningful_content = False
+                    min_content_length = 100  # Minimum characters for meaningful content
+                    
+                    for item in final_content:
+                        content = item.get('content', '')
+                        if isinstance(content, str) and len(content) > min_content_length:
+                            has_meaningful_content = True
+                            break
+                    
+                    if is_empty_summary or not has_meaningful_content:
+                        logger.warning("Not sending summary email as there is no meaningful content to summarize")
+                        # Update status but don't send email
+                        for item in unsummarized:
+                            item.is_summarized = True
+                        session.commit()
+                        logger.info(f"Marked {len(unsummarized)} empty content items as summarized without sending email")
+                        return
                     
                     # Mark the summary as sent
                     new_summary.sent = True
