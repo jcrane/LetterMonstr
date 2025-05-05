@@ -96,7 +96,7 @@ class EmailFetcher:
             return self.connect()
     
     def fetch_new_emails(self):
-        """Fetch unread emails from the configured folders."""
+        """Fetch emails from the configured folders, including both unread and recent emails."""
         mail = self.connect()
         session = get_session(self.db_path)
         
@@ -107,33 +107,53 @@ class EmailFetcher:
             # Calculate the date for the lookback period
             since_date = (datetime.now() - timedelta(days=self.lookback_days)).strftime("%d-%b-%Y")
             
+            logger.info(f"Looking for emails since {since_date} in folders: {self.folders}")
+            
             # Process each folder
             for folder in self.folders:
                 # Before each folder, ensure connection is still good
                 mail = self.check_connection(mail)
                 
                 # Select the mailbox/folder
-                mail.select(folder)
-                
-                # Search for unread emails within the lookback period
-                # Use UNSEEN flag to only get unread emails
-                status, messages = mail.search(None, f'(UNSEEN SINCE {since_date})')
-                
+                status, folder_info = mail.select(folder)
                 if status != 'OK':
-                    logger.warning(f"Failed to search folder {folder}: {messages}")
+                    logger.error(f"Failed to select folder {folder}: {folder_info}")
                     continue
                 
-                # Get the list of email IDs
-                email_ids = messages[0].split()
+                # Log how many messages are in the folder total
+                message_count = int(folder_info[0])
+                logger.info(f"Folder {folder} contains {message_count} total messages")
                 
-                if not email_ids:
-                    logger.info(f"No unread emails found in folder {folder} since {since_date}")
+                # First try to get all unread emails
+                status, unread_messages = mail.search(None, f'(UNSEEN SINCE {since_date})')
+                unread_ids = []
+                if status == 'OK' and unread_messages[0]:
+                    unread_ids = unread_messages[0].split()
+                    logger.info(f"Found {len(unread_ids)} unread emails in {folder}")
+                
+                # Next get all recent emails (last 7 days)
+                status, recent_messages = mail.search(None, f'(SINCE {since_date})')
+                recent_ids = []
+                if status == 'OK' and recent_messages[0]:
+                    recent_ids = recent_messages[0].split()
+                    logger.info(f"Found {len(recent_ids)} total recent emails in {folder}")
+                
+                # Combine the IDs, ensuring no duplicates
+                all_ids = list(set(unread_ids + recent_ids))
+                
+                # If we have a lot of emails, just take the most recent ones
+                if len(all_ids) > 20:
+                    logger.info(f"Limiting to 20 most recent emails out of {len(all_ids)}")
+                    all_ids = sorted(all_ids, reverse=True)[:20]
+                
+                if not all_ids:
+                    logger.info(f"No emails found in folder {folder} since {since_date}")
                     continue
                 
-                logger.info(f"Found {len(email_ids)} unread emails in folder {folder}")
+                logger.info(f"Processing {len(all_ids)} emails from folder {folder}")
                 
                 # Process each email
-                for e_id in email_ids:
+                for e_id in all_ids:
                     # Before each email fetch, check connection again if we've processed a lot
                     if len(all_emails) > 0 and len(all_emails) % 10 == 0:
                         mail = self.check_connection(mail)
@@ -148,12 +168,15 @@ class EmailFetcher:
                     # Parse the email message
                     msg = email_lib.message_from_bytes(msg_data[0][1])
                     
+                    # Get basic info for logging
+                    subject = self._decode_header(msg.get('Subject', 'No Subject'))
+                    sender = self._decode_header(msg.get('From', 'Unknown'))
+                    logger.info(f"Processing email: {subject} from {sender}")
+                    
                     # Check if this email was already processed in our database
                     message_id = msg.get('Message-ID', '')
                     if self._is_processed(session, message_id):
                         logger.info(f"Skipping already processed email: {message_id}")
-                        # Mark as read in Gmail since we've already processed it
-                        mail.store(e_id, '+FLAGS', '\\Seen')
                         continue
                     
                     # Process the email
@@ -162,8 +185,10 @@ class EmailFetcher:
                     if parsed_email:
                         # Add to the list of emails to process
                         all_emails.append(parsed_email)
-                        # Keep track of email IDs to mark as read later
+                        # Keep track of email IDs for marking
                         processed_email_ids.append((e_id, parsed_email))
+                    else:
+                        logger.warning(f"Failed to parse email {subject} - skipping")
             
             # Close the connection
             try:
@@ -174,7 +199,7 @@ class EmailFetcher:
                 logger.warning(f"Error closing mail connection: {e}")
             
             # Return the list of fetched emails
-            logger.info(f"Successfully fetched {len(all_emails)} new unread emails for processing")
+            logger.info(f"Successfully fetched {len(all_emails)} new emails for processing")
             return all_emails
             
         except Exception as e:

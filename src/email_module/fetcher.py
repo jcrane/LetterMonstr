@@ -82,19 +82,31 @@ class EmailFetcher:
                 # Select the mailbox/folder
                 mail.select(folder)
                 
-                # Search for emails within the lookback period
-                status, messages = mail.search(None, f'(SINCE {since_date})')
+                # Search for BOTH date-based emails AND unread emails to ensure we don't miss anything
+                logger.info(f"Searching folder {folder} for emails since {since_date} or unread")
                 
-                if status != 'OK':
-                    logger.warning(f"Failed to search folder {folder}: {messages}")
+                # First search recent emails based on date
+                status, date_messages = mail.search(None, f'(SINCE {since_date})')
+                
+                # Then search for all unread emails
+                status_unread, unread_messages = mail.search(None, 'UNSEEN')
+                
+                if status != 'OK' and status_unread != 'OK':
+                    logger.warning(f"Failed to search folder {folder}")
                     continue
                 
-                # Get the list of email IDs
-                email_ids = messages[0].split()
+                # Get the list of email IDs (combine date-based and unread)
+                date_email_ids = date_messages[0].split() if status == 'OK' else []
+                unread_email_ids = unread_messages[0].split() if status_unread == 'OK' else []
+                
+                # Combine and deduplicate email IDs
+                email_ids = list(set(date_email_ids + unread_email_ids))
                 
                 if not email_ids:
-                    logger.info(f"No emails found in folder {folder} since {since_date}")
+                    logger.info(f"No emails found in folder {folder} since {since_date} or unread")
                     continue
+                
+                logger.info(f"Found {len(email_ids)} emails to process in folder {folder}")
                 
                 # Process each email
                 for e_id in email_ids:
@@ -111,6 +123,7 @@ class EmailFetcher:
                     # Check if this email was already processed
                     message_id = msg.get('Message-ID', '')
                     if self._is_processed(session, message_id):
+                        logger.debug(f"Skipping already processed email: {msg.get('Subject', 'No Subject')}")
                         continue
                     
                     # Process the email
@@ -120,11 +133,13 @@ class EmailFetcher:
                         # Mark as processed in the database
                         self._mark_as_processed(session, parsed_email)
                         all_emails.append(parsed_email)
+                        logger.info(f"Successfully processed new email: {parsed_email['subject']}")
             
             # Close the connection
             mail.close()
             mail.logout()
             
+            logger.info(f"Finished email fetch, found {len(all_emails)} new emails to process")
             return all_emails
             
         except Exception as e:
