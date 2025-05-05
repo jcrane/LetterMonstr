@@ -525,8 +525,29 @@ def generate_and_send_summary(force=False):
                         "no extractable content"
                     ]
                     
+                    # If summary_text is a dictionary (from Claude API response), extract the actual text
+                    if isinstance(summary_text, dict):
+                        logger.info("Summary returned as dictionary, extracting text content")
+                        if 'summary' in summary_text:
+                            summary_text = summary_text['summary']
+                        elif 'content' in summary_text:
+                            summary_text = summary_text['content']
+                        else:
+                            # Convert the entire dict to a string as fallback
+                            summary_text = str(summary_text)
+
+                    # Ensure summary_text is a string
+                    if not isinstance(summary_text, str):
+                        summary_text = str(summary_text)
+                        logger.info(f"Converted non-string summary to string: {type(summary_text)}")
+
                     # Check if the summary just indicates there's no content
-                    is_empty_summary = any(indicator in summary_text.lower() for indicator in no_content_indicators)
+                    try:
+                        is_empty_summary = any(indicator in summary_text.lower() for indicator in no_content_indicators)
+                    except Exception as e:
+                        logger.error(f"Error checking if summary is empty: {e}, summary_text type: {type(summary_text)}")
+                        # If we can't check, assume it's not empty
+                        is_empty_summary = False
                     
                     # Also check if final content items have meaningful content
                     has_meaningful_content = False
