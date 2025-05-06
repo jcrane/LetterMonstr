@@ -11,6 +11,8 @@ import hashlib
 from datetime import datetime, timedelta
 import copy
 import json
+import time
+from sqlalchemy.exc import OperationalError
 
 from src.database.models import get_session, SummarizedContent, EmailContent
 
@@ -208,76 +210,81 @@ class ContentProcessor:
             session.close()
     
     def store_summarized_content(self, summary_id, content_items):
-        """Store signatures of summarized content for future deduplication."""
+        """Store the content signatures of items that have been summarized."""
         if not summary_id or not content_items:
             return
-            
-        # Open database session
-        session = get_session(self.db_path)
+        
+        # Maximum retry attempts for database operations
+        max_retries = 5
+        retry_delay = 0.5
+        
+        db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 
+                            'data', 'lettermonstr.db')
+        session = get_session(db_path)
+        
         try:
-            stored_count = 0
+            # Disable autoflush to prevent premature database operations
+            with session.no_autoflush:
+                for item in content_items:
+                    # Use existing hash if available
+                    content_hash = item.get('content_hash')
+                    if not content_hash:
+                        # Generate hash for this content
+                        para_hash = self._generate_content_hash(item)
+                    else:
+                        para_hash = content_hash
+                        
+                    # Get the title
+                    title = item.get('title', item.get('source', ''))
+                    
+                    # Generate a fingerprint (summary) of the content
+                    fingerprint = item.get('content', '')[:1000]  # Use first 1000 chars as fingerprint
+                    
+                    # Only store if this hash doesn't exist
+                    for attempt in range(max_retries):
+                        try:
+                            # Check if this content has already been summarized
+                            existing = session.query(SummarizedContent).filter_by(content_hash=para_hash).first()
+                            
+                            if not existing:
+                                # Store the signature
+                                summarized = SummarizedContent(
+                                    content_hash=para_hash,
+                                    content_title=title[:255] if title else '',  # Truncate to fit column
+                                    content_fingerprint=fingerprint,
+                                    summary_id=summary_id,
+                                    date_summarized=datetime.now()
+                                )
+                                session.add(summarized)
+                            break  # Success, exit retry loop
+                        except OperationalError as e:
+                            if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                                # Database is locked, try again after a delay
+                                wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                                logger.warning(f"Database locked when checking content hash, retrying in {wait_time:.2f}s (attempt {attempt+1}/{max_retries})")
+                                time.sleep(wait_time)
+                            else:
+                                # Re-raise if not a lock error or we've exhausted retries
+                                raise
             
-            for item in content_items:
-                # Extract title
-                title = item.get('source', '')
-                if 'Fwd: ' in title:
-                    title = title.split('Fwd: ', 1)[1]
-                
-                # Create content fingerprint
-                content = item.get('content', '')
-                fingerprint = content[:1000] if content else ''  # Use first 1000 chars as fingerprint
-                
-                # Create a unique hash for this content
-                content_hash = hashlib.md5((title + fingerprint[:100]).encode('utf-8')).hexdigest()
-                
-                # Check if content already exists
-                existing = session.query(SummarizedContent).filter_by(content_hash=content_hash).first()
-                if existing:
-                    logger.debug(f"Content already tracked: {title}")
-                    # Update the existing record with the latest summary ID
-                    existing.summary_id = summary_id
-                    existing.date_summarized = datetime.now()
-                    session.add(existing)
-                    stored_count += 1
-                    continue
-                
-                # Create signature record
-                signature = SummarizedContent(
-                    content_hash=content_hash,
-                    content_title=title,
-                    content_fingerprint=fingerprint,
-                    summary_id=summary_id,
-                    date_summarized=datetime.now()
-                )
-                
-                session.add(signature)
-                stored_count += 1
-                
-                # Store additional signatures for better deduplication
-                # Add a fingerprint based on just the first paragraph to catch similar content with slight modifications
-                if content and len(content) > 200:
-                    first_paragraph = content.split('\n\n')[0][:300]  # First paragraph, max 300 chars
-                    if len(first_paragraph) > 100:  # Only if it's substantial
-                        para_hash = hashlib.md5((title + first_paragraph).encode('utf-8')).hexdigest()
-                        # Check this variant doesn't already exist
-                        if not session.query(SummarizedContent).filter_by(content_hash=para_hash).first():
-                            para_signature = SummarizedContent(
-                                content_hash=para_hash,
-                                content_title=title,
-                                content_fingerprint=first_paragraph,
-                                summary_id=summary_id,
-                                date_summarized=datetime.now()
-                            )
-                            session.add(para_signature)
-                            stored_count += 1
-            
-            # Commit changes
-            session.commit()
-            logger.info(f"Stored {stored_count} content signatures for summary {summary_id}")
-            
+            # Commit in a separate retry loop to handle commit-time locks
+            for attempt in range(max_retries):
+                try:
+                    session.commit()
+                    break
+                except OperationalError as e:
+                    if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                        # Database is locked, try again after a delay
+                        wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                        logger.warning(f"Database locked during commit, retrying in {wait_time:.2f}s (attempt {attempt+1}/{max_retries})")
+                        time.sleep(wait_time)
+                    else:
+                        # Re-raise if not a lock error or we've exhausted retries
+                        raise
         except Exception as e:
             logger.error(f"Error storing summarized content signatures: {e}", exc_info=True)
-            session.rollback()
+            if hasattr(session, 'rollback'):
+                session.rollback()
         finally:
             session.close()
     
@@ -667,3 +674,19 @@ class ContentProcessor:
                     cleaned = cleaned[:pos]
         
         return cleaned 
+
+    def _generate_content_hash(self, item):
+        """Generate a hash for content to detect duplicates."""
+        # Extract title
+        title = item.get('title', item.get('source', ''))
+        if 'Fwd: ' in title:
+            title = title.split('Fwd: ', 1)[1]
+        
+        # Create content fingerprint
+        content = item.get('content', '')
+        fingerprint = content[:1000] if content else ''  # Use first 1000 chars as fingerprint
+        
+        # Create a unique hash for this content
+        content_hash = hashlib.md5((title + fingerprint[:100]).encode('utf-8')).hexdigest()
+        
+        return content_hash 
