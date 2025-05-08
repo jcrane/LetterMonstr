@@ -9,7 +9,7 @@ import os
 import sys
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 # Make sure the correct Python path is set
@@ -414,20 +414,70 @@ def should_send_summary():
     # Parse delivery time
     delivery_hour, delivery_minute = map(int, delivery_time_str.split(':'))
     
-    # Check if we're at or past the delivery time
-    time_check = (current_time.hour > delivery_hour) or \
-                 (current_time.hour == delivery_hour and current_time.minute >= delivery_minute)
+    # Create today's delivery time for comparison
+    todays_delivery_time = datetime(
+        current_time.year, 
+        current_time.month, 
+        current_time.day, 
+        delivery_hour, 
+        delivery_minute
+    )
+    
+    # Check if we're at or past today's delivery time but before tomorrow's delivery time
+    tomorrows_delivery_time = todays_delivery_time + timedelta(days=1)
+    time_window = current_time >= todays_delivery_time and current_time < tomorrows_delivery_time
+    time_match = abs((current_time - todays_delivery_time).total_seconds() / 60) <= 15  # Within 15 minutes of delivery time
+    
+    logger.info(f"Time window check: {time_window} (comparing {current_time} with window {todays_delivery_time} to {tomorrows_delivery_time})")
+    logger.info(f"Exact time match (±15 min): {time_match}")
     
     # Check if it's the right day based on frequency
+    day_check = False
     if frequency == 'daily':
-        return time_check
+        day_check = True
     elif frequency == 'weekly':
         delivery_day = config['summary']['weekly_day']
-        return current_time.weekday() == delivery_day and time_check
+        day_check = current_time.weekday() == delivery_day
     elif frequency == 'monthly':
         delivery_day = config['summary']['monthly_day']
-        return current_time.day == delivery_day and time_check
+        day_check = current_time.day == delivery_day
     
+    logger.info(f"Day check result for {frequency} frequency: {day_check}")
+    
+    # Check if there's unsummarized content
+    db_path = os.path.join('data', 'lettermonstr.db')
+    session = get_session(db_path)
+    has_content = False
+    
+    try:
+        # Check if there are any unsummarized content items
+        unsummarized_count = session.query(ProcessedContent).filter_by(is_summarized=False).count()
+        logger.info(f"Found {unsummarized_count} unsummarized content items")
+        has_content = unsummarized_count > 0
+        
+        # If no unsummarized content and we're at the delivery time, check for any content from the last 24 hours
+        if not has_content and time_match and day_check:
+            yesterday = current_time - timedelta(days=1)
+            recent_content_count = session.query(ProcessedContent).filter(
+                ProcessedContent.date_processed >= yesterday
+            ).count()
+            
+            logger.info(f"Found {recent_content_count} content items from the last 24 hours")
+            has_content = recent_content_count > 0
+    finally:
+        session.close()
+    
+    # If we're at the exact delivery time window (±15 min) on the right day and there is content, always send
+    if time_match and day_check and has_content:
+        logger.info("At delivery time window on the correct day with content available - will send summary")
+        return True
+        
+    # If we have unsummarized content and we're in the broader time window on the right day, send it
+    if time_window and day_check and has_content:
+        logger.info("In delivery time window on the correct day with unsummarized content - will send summary")
+        return True
+        
+    logger.info(f"Not sending summary. time_window: {time_window}, time_match: {time_match}, day_check: {day_check}, has_content: {has_content}")
     return False
 
 def schedule_jobs():
@@ -480,6 +530,50 @@ def main():
     
     # Log startup
     logger.info("LetterMonstr starting up")
+    
+    # Check for unsent summaries or content that should be summarized
+    logger.info("Checking for unsent content at startup...")
+    
+    try:
+        # Get database session
+        db_path = os.path.join('data', 'lettermonstr.db')
+        session = get_session(db_path)
+        
+        try:
+            # Check for unsent summaries first
+            unsent_summaries = session.query(Summary).filter_by(sent=False).all()
+            if unsent_summaries:
+                logger.info(f"Found {len(unsent_summaries)} unsent summaries, sending them...")
+                
+                # Initialize email sender
+                email_sender = EmailSender(config['summary'])
+                
+                # Send each unsent summary
+                for summary in unsent_summaries:
+                    try:
+                        logger.info(f"Sending summary {summary.id} created on {summary.creation_date}...")
+                        email_sender.send_summary(summary.summary_text)
+                        
+                        # Update summary status
+                        summary.sent = True
+                        summary.sent_date = datetime.now()
+                        
+                        session.commit()
+                        logger.info(f"Summary {summary.id} sent successfully")
+                    except Exception as e:
+                        logger.error(f"Error sending summary {summary.id}: {e}", exc_info=True)
+            else:
+                logger.info("No unsent summaries found")
+                
+                # Check for unsummarized content
+                unsummarized_content = session.query(ProcessedContent).filter_by(is_summarized=False).all()
+                if unsummarized_content:
+                    logger.info(f"Found {len(unsummarized_content)} unsummarized content items")
+                    process_newsletters()
+        finally:
+            session.close()
+    except Exception as e:
+        logger.error(f"Error checking for unsent summaries: {e}", exc_info=True)
     
     # Run the scheduler
     schedule_jobs()

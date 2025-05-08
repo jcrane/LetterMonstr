@@ -193,13 +193,29 @@ def get_engine(db_path=None):
     # Ensure directory exists
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     
-    # Create engine with connection pool settings
+    # Create engine with improved SQLite settings for concurrency
     engine = create_engine(
         f'sqlite:///{db_path}',
-        connect_args={'timeout': 30},  # Increase timeout for locks
-        pool_recycle=3600,  # Recycle connections after 1 hour
-        pool_pre_ping=True  # Verify connections before use
+        connect_args={
+            'timeout': 60,  # Increase timeout for locks to 60 seconds
+            'check_same_thread': False,  # Allow crossing thread boundaries
+        },
+        # Use valid SQLAlchemy isolation level
+        isolation_level="SERIALIZABLE",  # Most conservative isolation level for data consistency
+        pool_recycle=1800,  # Recycle connections after 30 minutes
+        pool_pre_ping=True,  # Verify connections before use
+        pool_size=5,  # Limit concurrent connections
+        max_overflow=10  # Allow up to 10 overflow connections
     )
+    
+    # Set pragmas for better concurrency
+    with engine.connect() as conn:
+        conn.execute(text("PRAGMA journal_mode=WAL"))  # Use WAL mode for better concurrency
+        conn.execute(text("PRAGMA busy_timeout=60000"))  # 60 second busy timeout
+        conn.execute(text("PRAGMA synchronous=NORMAL"))  # Balances safety and performance
+        conn.execute(text("PRAGMA temp_store=MEMORY"))  # Store temp tables in memory
+        conn.execute(text("PRAGMA cache_size=10000"))  # Larger cache (about 10MB)
+    
     return engine
 
 def get_session(db_path=None):
@@ -211,23 +227,31 @@ def get_session(db_path=None):
     max_retries = 5
     retry_count = 0
     retry_delay = 1  # Start with 1 second delay
+    last_error = None
     
     while retry_count < max_retries:
         try:
-            return Session()
+            session = Session()
+            # Test the connection with a simple query
+            session.execute(text("SELECT 1"))
+            return session
         except OperationalError as e:
-            if "database is locked" in str(e) and retry_count < max_retries:
+            if "database is locked" in str(e) and retry_count < max_retries - 1:
                 retry_count += 1
                 logger.warning(f"Database locked, retrying in {retry_delay} seconds (attempt {retry_count}/{max_retries})")
                 time.sleep(retry_delay)
                 retry_delay *= 2  # Exponential backoff
+                last_error = e
             else:
                 # Re-raise if it's not a lock error or we've exhausted retries
                 logger.error(f"Database error after {retry_count} retries: {e}")
                 raise
     
     # If we get here, we've exhausted retries
-    raise OperationalError("Failed to acquire database connection after maximum retries", None, None)
+    if last_error:
+        raise last_error
+    else:
+        raise OperationalError("Failed to acquire database connection after maximum retries", None, None)
 
 def init_db(db_path):
     """Initialize the database."""

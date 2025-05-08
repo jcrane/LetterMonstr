@@ -143,14 +143,6 @@ class SummaryGenerator:
         # Count meaningful content items
         meaningful_items = 0
         
-        # Define problematic domains to filter out
-        problematic_domains = [
-            'beehiiv.com', 'media.beehiiv.com', 'link.mail.beehiiv.com',
-            'mailchimp.com', 'substack.com', 'bytebytego.com',
-            'sciencealert.com', 'leapfin.com', 'cutt.ly',
-            'genai.works', 'link.genai.works'
-        ]
-        
         # Helper function to check if a URL is just a root domain (not a specific article)
         def is_root_domain(url):
             if not url or not isinstance(url, str):
@@ -165,34 +157,8 @@ class SummaryGenerator:
                     parsed_url.path.lower() in ['/index.html', '/index.php', '/home'] or
                     len(parsed_url.path) < 5)
         
-        # Helper function to filter URLs
-        def filter_urls(urls):
-            if not urls:
-                return []
-                
-            filtered = []
-            for url in urls:
-                # Skip if not a string
-                if not isinstance(url, str):
-                    continue
-                    
-                # Skip if not http(s)
-                if not url.lower().startswith(('http://', 'https://')):
-                    continue
-                    
-                # Parse the URL
-                from urllib.parse import urlparse
-                parsed_url = urlparse(url)
-                
-                # Skip if it's a problematic domain and just a root
-                domain = parsed_url.netloc.lower()
-                if any(domain.endswith(prob) for prob in problematic_domains) and is_root_domain(url):
-                    logger.info(f"Filtering out root domain URL: {url}")
-                    continue
-                    
-                filtered.append(url)
-                
-            return filtered
+        # Store the is_root_domain function for other methods to use
+        self.is_root_domain = is_root_domain
         
         # First pass: Calculate total content length from all sources
         for item in processed_content:
@@ -266,7 +232,7 @@ class SummaryGenerator:
                         import re
                         url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
                         content_urls = re.findall(url_pattern, item['content'])
-                        item['urls'] = filter_urls(content_urls)
+                        item['urls'] = self.filter_urls(content_urls)
                     except Exception as e:
                         logger.warning(f"Error extracting URLs from content: {e}")
                         
@@ -343,7 +309,7 @@ class SummaryGenerator:
                     import re
                     url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
                     content_urls = re.findall(url_pattern, content)
-                    content_urls = filter_urls(content_urls)
+                    content_urls = self.filter_urls(content_urls)
                     for url in content_urls:
                         if url not in source_links:
                             source_links.append(url)
@@ -428,7 +394,7 @@ class SummaryGenerator:
                     import re
                     url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
                     content_urls = re.findall(url_pattern, content)
-                    content_urls = filter_urls(content_urls)
+                    content_urls = self.filter_urls(content_urls)
                     for url in content_urls:
                         if url not in source_links:
                             source_links.append(url)
@@ -488,6 +454,17 @@ class SummaryGenerator:
     def _call_claude_api(self, prompt):
         """Call Claude API to generate a summary."""
         try:
+            logger.info(f"Calling Claude API with model {self.model} and max_tokens {self.max_tokens}")
+            
+            if not self.client:
+                logger.error("Claude API client is not initialized - check your API key configuration")
+                return "Error: Claude API client is not initialized. Please check your API key configuration."
+            
+            # Log prompt size for debugging
+            system_chars = len(prompt['system']) if 'system' in prompt else 0
+            user_chars = len(prompt['user']) if 'user' in prompt else 0
+            logger.info(f"Prompt size: system={system_chars} chars, user={user_chars} chars")
+            
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=self.max_tokens,  # Use value from config instead of hardcoding
@@ -499,6 +476,7 @@ class SummaryGenerator:
             
             # Extract the summary from the response
             summary = response.content[0].text
+            logger.info(f"Claude API responded with {len(summary)} characters")
             
             return summary
         except Exception as e:
@@ -806,3 +784,63 @@ Please combine these summaries into a single coherent summary that:
         except Exception as e:
             logger.error(f"Error unwrapping tracking URL {url}: {e}", exc_info=True)
             return None
+
+    def filter_urls(self, urls, max_urls=20):
+        """Filter URLs to remove tracking links and root domains.
+        
+        Args:
+            urls: List of URLs to filter
+            max_urls: Maximum number of URLs to process to prevent infinite loops
+        
+        Returns:
+            List of filtered URLs
+        """
+        if not urls:
+            return []
+        
+        # Deduplicate URLs first to reduce processing
+        unique_urls = list(set(urls))
+        
+        # Limit maximum URLs to process
+        if len(unique_urls) > max_urls:
+            logger.info(f"Limiting URL filtering from {len(unique_urls)} to {max_urls} URLs")
+            unique_urls = unique_urls[:max_urls]
+            
+        filtered = []
+        filtered_count = 0
+        
+        # Define problematic domains to filter out
+        problematic_domains = [
+            'beehiiv.com', 'media.beehiiv.com', 'link.mail.beehiiv.com',
+            'mailchimp.com', 'substack.com', 'bytebytego.com',
+            'sciencealert.com', 'leapfin.com', 'cutt.ly',
+            'genai.works', 'link.genai.works'
+        ]
+        
+        for url in unique_urls:
+            # Skip if not a string
+            if not isinstance(url, str):
+                continue
+            
+            # Skip if not http(s)
+            if not url.lower().startswith(('http://', 'https://')):
+                continue
+            
+            # Parse the URL
+            from urllib.parse import urlparse
+            parsed_url = urlparse(url)
+            
+            # Skip if it's a problematic domain and just a root
+            domain = parsed_url.netloc.lower()
+            if any(domain.endswith(prob) for prob in problematic_domains) and self.is_root_domain(url):
+                # Log only the first few filtered URLs to avoid log spam
+                filtered_count += 1
+                if filtered_count <= 3:
+                    logger.info(f"Filtering out root domain URL: {url}")
+                elif filtered_count == 4:
+                    logger.info(f"Filtering out additional root domain URLs (limiting log output)")
+                continue
+            
+            filtered.append(url)
+        
+        return filtered

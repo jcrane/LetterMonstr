@@ -55,25 +55,58 @@ def db_retry(max_retries=5, retry_delay=0.5):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            attempt = 0
             last_exception = None
-            for attempt in range(max_retries):
+            current_delay = retry_delay
+
+            while attempt <= max_retries:
                 try:
+                    # Clear any previous session if it exists in kwargs
+                    if 'session' in kwargs and kwargs['session'] is not None:
+                        try:
+                            kwargs['session'].close()
+                        except:
+                            pass
+                        kwargs['session'] = None
+
+                    # Try the function
                     return func(*args, **kwargs)
+                    
                 except OperationalError as e:
-                    if "database is locked" in str(e).lower() and attempt < max_retries - 1:
-                        wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
-                        logger.warning(f"Database locked in {func.__name__}, retrying in {wait_time:.2f}s (attempt {attempt+1}/{max_retries})")
-                        time.sleep(wait_time)
+                    # Check if it's a database lock error
+                    if "database is locked" in str(e).lower() and attempt < max_retries:
+                        attempt += 1
+                        
+                        # Log the retry attempt
+                        logger.warning(f"Database locked in {func.__name__}, retrying in {current_delay:.2f}s (attempt {attempt}/{max_retries})")
+                        
+                        # Wait with exponential backoff plus small random jitter to prevent thundering herd
+                        jitter = random.uniform(0, 0.5)
+                        time.sleep(current_delay + jitter)
+                        
+                        # Increase delay for next attempt with exponential backoff
+                        current_delay *= 2
                         last_exception = e
-                        continue
-                    raise e
+                        
+                    else:
+                        # Not a lock error or max retries reached
+                        if attempt > 0:
+                            logger.error(f"Database operation in {func.__name__} failed after {attempt} retries: {e}")
+                        else:
+                            logger.error(f"Database error in {func.__name__}: {e}")
+                        raise e
+                        
                 except Exception as e:
+                    # For non-database errors, log and re-raise immediately
+                    logger.error(f"Error in {func.__name__}: {e}")
                     raise e
             
-            # If we get here, we've exhausted all retries
+            # If we exhausted all retries
             if last_exception:
                 logger.error(f"Database remained locked after {max_retries} retries in {func.__name__}")
                 raise last_exception
+            else:
+                raise RuntimeError(f"Failed to execute {func.__name__} after {max_retries} attempts for unknown reasons")
                 
         return wrapper
     return decorator
@@ -84,27 +117,70 @@ def with_db_transaction(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         # Create a new session for each call
-        session = get_session()
+        session = None
+        max_retries = 5
+        retry_count = 0
+        retry_delay = 1  # Start with 1 second delay
         
-        # Add the session to the kwargs
-        kwargs['session'] = session
-        
-        try:
-            # Call the function with the session
-            result = func(*args, **kwargs)
-            
-            # Commit the transaction if everything went well
-            session.commit()
-            return result
-        except Exception as e:
-            # Rollback the transaction on error
-            if hasattr(session, 'rollback'):
-                session.rollback()
-            # Re-raise the exception
-            raise e
-        finally:
-            # Always close the session
-            session.close()
+        while retry_count <= max_retries:
+            try:
+                # Create a fresh session for this attempt
+                if session is not None:
+                    try:
+                        session.close()
+                    except:
+                        pass
+                
+                session = get_session()
+                
+                # Add the session to the kwargs
+                kwargs['session'] = session
+                
+                # Call the function with the session
+                result = func(*args, **kwargs)
+                
+                # Commit the transaction if everything went well
+                session.commit()
+                return result
+                
+            except OperationalError as e:
+                # Handle database lock errors with retries
+                if "database is locked" in str(e).lower() and retry_count < max_retries:
+                    retry_count += 1
+                    logger.warning(f"Database locked in {func.__name__}, retrying in {retry_delay}s (attempt {retry_count}/{max_retries})")
+                    
+                    # Roll back any pending transaction
+                    if session and hasattr(session, 'rollback'):
+                        try:
+                            session.rollback()
+                        except:
+                            pass
+                    
+                    # Wait before retrying with exponential backoff
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    # Re-raise if it's not a lock error or we've exhausted retries
+                    logger.error(f"Database error in {func.__name__} after {retry_count} retries: {e}")
+                    if session and hasattr(session, 'rollback'):
+                        session.rollback()
+                    raise
+                    
+            except Exception as e:
+                # Rollback the transaction on any other error
+                logger.error(f"Error in {func.__name__}: {e}")
+                if session and hasattr(session, 'rollback'):
+                    session.rollback()
+                # Re-raise the exception
+                raise e
+                
+            finally:
+                # Always close the session to prevent connection leaks
+                if session:
+                    try:
+                        session.close()
+                    except:
+                        pass
     
     return wrapper
 
@@ -150,9 +226,11 @@ def should_send_summary(config, force=False):
     
     # Check if we're at or past today's delivery time but before tomorrow's delivery time
     tomorrows_delivery_time = todays_delivery_time + timedelta(days=1)
-    time_check = current_time >= todays_delivery_time and current_time < tomorrows_delivery_time
+    time_window = current_time >= todays_delivery_time and current_time < tomorrows_delivery_time
+    time_match = abs((current_time - todays_delivery_time).total_seconds() / 60) <= 15  # Within 15 minutes of delivery time
     
-    logger.info(f"Time check result: {time_check} (comparing {current_time} with delivery window {todays_delivery_time} to {tomorrows_delivery_time})")
+    logger.info(f"Time window check: {time_window} (within {todays_delivery_time} to {tomorrows_delivery_time})")
+    logger.info(f"Exact time match (±15 min): {time_match}")
     
     # Check if it's the right day based on frequency
     day_check = False
@@ -167,72 +245,41 @@ def should_send_summary(config, force=False):
     
     logger.info(f"Day check result for {frequency} frequency: {day_check}")
     
-    # If it's not the right time or day, don't send a summary
-    if not (time_check and day_check):
-        logger.info(f"Not sending summary. time_check: {time_check}, day_check: {day_check}")
-        return False
-    
-    # Check if there's unsummarized content to send
+    # Check if there's unsummarized content
     db_path = os.path.join(project_root, 'data', 'lettermonstr.db')
     session = get_session(db_path)
+    has_content = False
+    
     try:
         # Check if there are any unsummarized content items
         unsummarized_count = session.query(ProcessedContent).filter_by(is_summarized=False).count()
         logger.info(f"Found {unsummarized_count} unsummarized content items")
+        has_content = unsummarized_count > 0
         
-        if unsummarized_count > 0:
-            # There's unsummarized content, so we should send a summary
-            logger.info("Found unsummarized content, will send summary")
-            return True
-        
-        # If we're in the delivery window, always send a summary at the configured time
-        # Check if we're within 15 minutes of the configured delivery time
-        time_diff = abs((current_time - todays_delivery_time).total_seconds() / 60)
-        if time_diff <= 15:
-            logger.info(f"Within delivery window (±15 minutes of {formatted_delivery_time}), checking for any content")
+        # If no unsummarized content, check for any content from the last 24 hours
+        if not has_content and time_match and day_check:
+            yesterday = current_time - timedelta(days=1)
+            recent_content_count = session.query(ProcessedContent).filter(
+                ProcessedContent.date_processed >= yesterday
+            ).count()
             
-            # Check if there is any content at all, even if it's already been summarized
-            total_content_count = session.query(ProcessedContent).count()
-            if total_content_count > 0:
-                # Get content from the last 24 hours
-                yesterday = current_time - timedelta(days=1)
-                recent_content_count = session.query(ProcessedContent).filter(ProcessedContent.date_processed >= yesterday).count()
-                
-                if recent_content_count > 0:
-                    logger.info(f"Found {recent_content_count} recent content items, will send summary at scheduled time")
-                    return True
-                
-                logger.info("No recent content found, won't send an empty summary")
-                return False
-            
-            logger.info("No content found at all, won't send an empty summary")
-            return False
-        
-        # Get the latest summary
-        latest_summary = session.query(Summary).filter(
-            Summary.sent == True
-        ).order_by(Summary.sent_date.desc()).first()
-        
-        if latest_summary and latest_summary.sent_date:
-            hours_since_last_summary = (datetime.now() - latest_summary.sent_date).total_seconds() / 3600
-            logger.info(f"Hours since last summary: {hours_since_last_summary:.1f}")
-            
-            # Send a summary if it's been more than 24 hours since the last one
-            if hours_since_last_summary >= 24:
-                logger.info("More than 24 hours since last summary, will send a summary")
-                return True
-        else:
-            # No summaries sent yet, so we should send one
-            logger.info("No summaries have been sent yet, will send a summary")
-            return True
-        
-        logger.info("No unsummarized content and not in delivery window, won't send summary")
-        return False
-    except Exception as e:
-        logger.error(f"Error checking for content to summarize: {e}", exc_info=True)
-        return False  # If there's an error, be cautious and don't send
+            logger.info(f"Found {recent_content_count} content items from the last 24 hours")
+            has_content = recent_content_count > 0
     finally:
         session.close()
+    
+    # If we're at the exact delivery time window (±15 min) on the right day and there is content, always send
+    if time_match and day_check and has_content:
+        logger.info("At delivery time window on the correct day with content available - will send summary")
+        return True
+        
+    # If we have unsummarized content and we're in the broader time window on the right day, send it
+    if time_window and day_check and has_content:
+        logger.info("In delivery time window on the correct day with unsummarized content - will send summary")
+        return True
+        
+    logger.info(f"Not sending summary. time_window: {time_window}, time_match: {time_match}, day_check: {day_check}, has_content: {has_content}")
+    return False
 
 @db_retry(max_retries=5)
 @with_db_transaction
@@ -291,10 +338,9 @@ def generate_and_send_summary(force=False, session=None):
                     session.flush()  # Flush changes but don't commit yet
                     
                     # Send the email
-                    status = email_sender.send_summary_email(
+                    status = email_sender.send_summary(
                         summary.summary_text,
-                        config['summary'].get('recipient_email', 'user@example.com'),
-                        f"Your Letter Summary - {datetime.now().strftime('%A, %B %d')}"
+                        summary.id
                     )
                     
                     if status:
@@ -471,73 +517,62 @@ def generate_and_send_summary(force=False, session=None):
                         item_chars = len(item.get('content', ''))
                         item_tokens = item_chars // 4
                         
-                        batches = []
-                        current_batch = []
-                        current_batch_chars = 0
-                        
-                        # Create batches based on token estimates
-                        for item in sorted_content:
-                            item_chars = len(item.get('content', ''))
-                            item_tokens = item_chars // 4
-                            
-                            # If adding this item would exceed our limit, start a new batch
-                            if current_batch_chars // 4 + item_tokens > TOKEN_BATCH_LIMIT and current_batch:
-                                batches.append(current_batch)
-                                current_batch = [item]
-                                current_batch_chars = item_chars
-                            else:
-                                current_batch.append(item)
-                                current_batch_chars += item_chars
-                        
-                        # Add the last batch if it has items
-                        if current_batch:
+                        # If adding this item would exceed our limit, start a new batch
+                        if current_batch_chars // 4 + item_tokens > TOKEN_BATCH_LIMIT and current_batch:
                             batches.append(current_batch)
-                        
-                        logger.info(f"Split content into {len(batches)} batches")
-                        
-                        # Generate summaries for each batch
-                        batch_summaries = []
-                        for i, batch in enumerate(batches):
-                            batch_tokens = sum(len(item.get('content', '')) for item in batch) // 4
-                            logger.info(f"Generating summary for batch {i+1}/{len(batches)} ({batch_tokens} tokens)...")
-                            try:
-                                batch_summary = summary_generator.generate_summary(batch)
-                                if batch_summary:
-                                    batch_summaries.append(batch_summary)
-                                    logger.info(f"Batch {i+1} summary generated successfully")
-                                else:
-                                    logger.warning(f"Failed to generate summary for batch {i+1}")
-                            except Exception as e:
-                                logger.error(f"Error generating summary for batch {i+1}: {e}", exc_info=True)
-                                # Try with a smaller portion of the batch if possible
-                                if len(batch) > 1:
-                                    logger.info(f"Attempting to generate summary with half of batch {i+1}...")
-                                    half_size = len(batch) // 2
-                                    try:
-                                        half_batch_summary = summary_generator.generate_summary(batch[:half_size])
-                                        if half_batch_summary:
-                                            batch_summaries.append(half_batch_summary)
-                                            logger.info(f"Generated summary for first half of batch {i+1}")
-                                        
-                                        # Try the second half too
-                                        second_half_summary = summary_generator.generate_summary(batch[half_size:])
-                                        if second_half_summary:
-                                            batch_summaries.append(second_half_summary)
-                                            logger.info(f"Generated summary for second half of batch {i+1}")
-                                    except Exception as e2:
-                                        logger.error(f"Error generating summary for half of batch {i+1}: {e2}", exc_info=True)
-                        
-                        # Combine all batch summaries
-                        if batch_summaries:
-                            logger.info(f"Combining {len(batch_summaries)} batch summaries...")
-                            if len(batch_summaries) == 1:
-                                summary_text = batch_summaries[0]
-                            else:
-                                # Use the dedicated method to combine summaries
-                                summary_text = summary_generator.combine_summaries(batch_summaries)
-                            logger.info("Combined summary created successfully")
+                            current_batch = [item]
+                            current_batch_chars = item_chars
                         else:
-                            raise Exception("No batch summaries were generated")
+                            current_batch.append(item)
+                            current_batch_chars += item_chars
+                    
+                    # Add the last batch if it has items
+                    if current_batch:
+                        batches.append(current_batch)
+                    
+                    logger.info(f"Split content into {len(batches)} batches")
+                    
+                    # Generate summaries for each batch
+                    batch_summaries = []
+                    for i, batch in enumerate(batches):
+                        batch_tokens = sum(len(item.get('content', '')) for item in batch) // 4
+                        logger.info(f"Generating summary for batch {i+1}/{len(batches)} ({batch_tokens} tokens)...")
+                        try:
+                            batch_summary = summary_generator.generate_summary(batch)
+                            if batch_summary:
+                                batch_summaries.append(batch_summary)
+                                logger.info(f"Batch {i+1} summary generated successfully")
+                            else:
+                                logger.warning(f"Failed to generate summary for batch {i+1}")
+                        except Exception as e:
+                            logger.error(f"Error generating summary for batch {i+1}: {e}", exc_info=True)
+                            # Try with a smaller portion of the batch if possible
+                            if len(batch) > 1:
+                                logger.info(f"Attempting to generate summary with half of batch {i+1}...")
+                                half_size = len(batch) // 2
+                                try:
+                                    half_batch_summary = summary_generator.generate_summary(batch[:half_size])
+                                    if half_batch_summary:
+                                        batch_summaries.append(half_batch_summary)
+                                        logger.info(f"Generated summary for first half of batch {i+1}")
+                                    
+                                    # Try the second half too
+                                    second_half_summary = summary_generator.generate_summary(batch[half_size:])
+                                    if second_half_summary:
+                                        batch_summaries.append(second_half_summary)
+                                        logger.info(f"Generated summary for second half of batch {i+1}")
+                                except Exception as e2:
+                                    logger.error(f"Error generating summary for half of batch {i+1}: {e2}", exc_info=True)
+                    
+                    # Combine all batch summaries
+                    if batch_summaries:
+                        logger.info(f"Combining {len(batch_summaries)} batch summaries...")
+                        if len(batch_summaries) == 1:
+                            summary_text = batch_summaries[0]
+                        else:
+                            # Use the dedicated method to combine summaries
+                            summary_text = summary_generator.combine_summaries(batch_summaries)
+                        logger.info("Combined summary created successfully")
                     else:
                         raise Exception("No batch summaries were generated")
                 else:
@@ -835,6 +870,10 @@ def main():
     if force:
         logger.info("Force flag detected, generating summary immediately")
         generate_and_send_summary(force=True)
+    else:
+        # Check for unsent content at startup
+        logger.info("Checking for unsent content at startup...")
+        generate_and_send_summary(force=False)
         
     # Use the setup_scheduler function to handle all scheduling
     setup_scheduler()
