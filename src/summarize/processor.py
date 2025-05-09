@@ -22,9 +22,13 @@ class ContentProcessor:
     """Processes and deduplicates content from different sources."""
     
     def __init__(self, config):
-        """Initialize with content configuration."""
-        self.ad_keywords = config['ad_keywords']
-        self.similarity_threshold = 0.95  # Raised to require very high content similarity
+        """Initialize processor with configuration."""
+        self.config = config
+        # Less aggressive similarity threshold for deduplication
+        self.similarity_threshold = 0.85  # Increased from lower value to require higher similarity
+        # Minimum content length to consider for processing
+        self.min_content_length = 100
+        self.ad_keywords = config.get('ad_keywords', [])
         self.title_similarity_threshold = 0.95  # Raised to require very high title similarity
         self.db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 
                                 'data', 'lettermonstr.db')
@@ -496,8 +500,8 @@ class ContentProcessor:
             if not content or not isinstance(content, str):
                 continue
             
-            # Generate a hash of the first 1000 chars for comparison
-            content_sample = content[:1000]
+            # Generate a hash of the first 2500 chars for comparison (increased from 1000)
+            content_sample = content[:2500]
             content_hash = hashlib.md5(content_sample.encode('utf-8')).hexdigest()
             
             if content_hash in content_hash_map:

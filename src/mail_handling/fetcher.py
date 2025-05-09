@@ -8,7 +8,7 @@ import imaplib
 import logging
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import socket
 import time
 import email as email_lib
@@ -98,59 +98,52 @@ class EmailFetcher:
     def fetch_new_emails(self):
         """Fetch emails from the configured folders, including both unread and recent emails."""
         mail = self.connect()
-        session = get_session(self.db_path)
         
         all_emails = []
         processed_email_ids = []
         
+        session = get_session(self.db_path)
         try:
-            # Calculate the date for the lookback period
-            since_date = (datetime.now() - timedelta(days=self.lookback_days)).strftime("%d-%b-%Y")
-            
-            logger.info(f"Looking for emails since {since_date} in folders: {self.folders}")
+            # Calculate the date threshold (1 day ago as a fallback)
+            since_date = (datetime.now() - timedelta(days=1)).strftime("%d-%b-%Y")
             
             # Process each folder
             for folder in self.folders:
-                # Before each folder, ensure connection is still good
-                mail = self.check_connection(mail)
-                
                 # Select the mailbox/folder
-                status, folder_info = mail.select(folder)
+                mail.select(folder)
+                
+                # Search for ALL UNREAD emails AND any recent emails
+                # This ensures we get all unread regardless of date, plus new ones
+                status, messages = mail.search(None, 'UNSEEN')
+                
                 if status != 'OK':
-                    logger.error(f"Failed to select folder {folder}: {folder_info}")
+                    logger.warning(f"Failed to search for unread emails in folder {folder}: {messages}")
                     continue
                 
-                # Log how many messages are in the folder total
-                message_count = int(folder_info[0])
-                logger.info(f"Folder {folder} contains {message_count} total messages")
+                # Get the list of unread email IDs
+                unread_ids = messages[0].split()
                 
-                # First try to get all unread emails
-                status, unread_messages = mail.search(None, f'(UNSEEN SINCE {since_date})')
-                unread_ids = []
-                if status == 'OK' and unread_messages[0]:
-                    unread_ids = unread_messages[0].split()
-                    logger.info(f"Found {len(unread_ids)} unread emails in {folder}")
+                # Also search for recent emails (potentially already read)
+                status, messages = mail.search(None, f'(SINCE {since_date})')
                 
-                # Next get all recent emails (last 7 days)
-                status, recent_messages = mail.search(None, f'(SINCE {since_date})')
-                recent_ids = []
-                if status == 'OK' and recent_messages[0]:
-                    recent_ids = recent_messages[0].split()
-                    logger.info(f"Found {len(recent_ids)} total recent emails in {folder}")
-                
-                # Combine the IDs, ensuring no duplicates
-                all_ids = list(set(unread_ids + recent_ids))
-                
-                # If we have a lot of emails, just take the most recent ones
-                if len(all_ids) > 20:
-                    logger.info(f"Limiting to 20 most recent emails out of {len(all_ids)}")
-                    all_ids = sorted(all_ids, reverse=True)[:20]
+                if status != 'OK':
+                    logger.warning(f"Failed to search for recent emails in folder {folder}: {messages}")
+                    # Still continue with unread emails if we found any
+                    if unread_ids:
+                        logger.info(f"Using only unread emails for folder {folder}")
+                        all_ids = unread_ids
+                    else:
+                        continue
+                else:
+                    # Combine unread and recent email IDs, removing duplicates
+                    recent_ids = messages[0].split()
+                    all_ids = list(set(unread_ids + recent_ids))
                 
                 if not all_ids:
-                    logger.info(f"No emails found in folder {folder} since {since_date}")
+                    logger.info(f"No emails to process in folder {folder}")
                     continue
                 
-                logger.info(f"Processing {len(all_ids)} emails from folder {folder}")
+                logger.info(f"Found {len(all_ids)} emails to process in folder {folder}")
                 
                 # Process each email
                 for e_id in all_ids:
@@ -297,8 +290,9 @@ class EmailFetcher:
                 
                 # Mark each email as processed in database and read in Gmail
                 for email in processed_emails:
-                    # Mark as processed in database
-                    self._mark_as_processed(session, email)
+                    # Mark as processed in database only if it has a message_id
+                    if 'message_id' in email and email['message_id']:
+                        self._mark_as_processed(session, email)
                     
                     # Search for the email in this folder by Message-ID
                     status, messages = mail.search(None, f'(HEADER Message-ID "{email["message_id"]}")')
@@ -321,47 +315,49 @@ class EmailFetcher:
             session.close()
     
     def _parse_email(self, msg):
-        """Parse an email message into a dictionary of relevant fields."""
+        """Parse an email message into a dictionary with metadata and content."""
         try:
-            # Extract subject
-            subject = msg.get('Subject', '')
-            if subject:
-                subject = self._decode_header(subject)
-            
-            # Extract sender
-            sender = msg.get('From', '')
-            if sender:
-                sender = self._decode_header(sender)
-            
-            # Extract date
-            date_str = msg.get('Date', '')
-            date = datetime.now()
-            if date_str:
-                try:
-                    # Try parsing with email.utils
-                    date_tuple = email_lib.utils.parsedate(date_str)
-                    if date_tuple:
-                        date = datetime(*date_tuple[:6])
-                    else:
-                        # Try with parsedate_to_datetime
-                        date = email_lib.utils.parsedate_to_datetime(date_str)
-                except:
-                    logger.warning(f"Could not parse date: {date_str}")
-            
-            # Extract message ID
+            # Extract message metadata
             message_id = msg.get('Message-ID', '')
+            subject = self._decode_header(msg.get('Subject', 'No Subject'))
+            sender = self._decode_header(msg.get('From', 'Unknown'))
+            date_str = msg.get('Date', '')
+            
+            try:
+                # Parse the date
+                date = email_lib.utils.parsedate_to_datetime(date_str)
+            except (TypeError, ValueError):
+                # If date parsing fails, use current date
+                date = datetime.now()
+            
+            # Check if the date is timezone-aware, if not make it UTC
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=timezone.utc)
             
             # Extract content
             content = self._get_email_content(msg)
             
+            # Basic clean text - sanitize any unusual chars
+            text_content = content.get('text', '')
+            if text_content:
+                # Remove null bytes and other control characters
+                text_content = ''.join(c if ord(c) >= 32 or c in '\n\r\t' else ' ' for c in text_content)
+                content['text'] = text_content
+            
+            # Log the content sizes for debugging
+            html_size = len(content.get('html', ''))
+            text_size = len(content.get('text', ''))
+            logger.info(f"Extracted HTML: {html_size} chars, text: {text_size} chars from email: {subject}")
+            
             return {
+                'message_id': message_id,
                 'subject': subject,
                 'sender': sender,
                 'date': date,
-                'message_id': message_id,
-                'content': content
+                'content': content.get('text', ''),
+                'html': content.get('html', ''),
+                'raw_content': content.get('raw_content', '')
             }
-            
         except Exception as e:
             logger.error(f"Error parsing email: {e}", exc_info=True)
             return None

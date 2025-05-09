@@ -21,14 +21,28 @@ logger = logging.getLogger(__name__)
 # Define the system prompts for different summary formats
 LLM_SYSTEM_PROMPTS = {
     'newsletter': """You are an expert email summarizer that creates comprehensive, detailed summaries of newsletter content. 
+DO NOT LOSE ANY UNIQUE CONTENT OR IDEAS when summarizing. Your primary goal is COMPREHENSIVE COVERAGE.
 Extract ALL key information, insights, and main points from the provided content.
-Do not omit or truncate important content - include all significant information.
+Be extremely thorough - every distinct concept, idea, example, statistic, or insight MUST be represented in your summary.
+NEVER omit or truncate important content - include all significant information and unique ideas.
 Organize the summary by category or topic, with clear headings.
 Be thorough, factual, objective, and comprehensive in your coverage.
 Include all important details, statistics, quotes, and unique information from each source.
 Your summary should be well-structured with proper headings, paragraphs, bullet points, and clear formatting.
-ALWAYS include "Read more" links with the original URLs for each article or section you summarize.
-Format "Read more" links as HTML: <a href="URL">Read more</a>
+
+CRITICALLY IMPORTANT - READ MORE LINKS:
+* After EACH SECTION you summarize, you MUST include links to the source content
+* Format links with DESCRIPTIVE text: <a href="URL">Read more from [Publication/Source Name]</a>
+* NEVER just use "Read more" - always include the source name in the link text
+* Every section MUST end with at least one source link
+* If a section has multiple sources, include multiple links with different source names
+* NEVER omit these source links - they are REQUIRED for each section
+* Each link should appear on its own line after the relevant content
+* Examples of good link text:
+  - <a href="URL">Read more from The Verge</a>
+  - <a href="URL">Full article on TechCrunch</a>
+  - <a href="URL">Original post on Substack</a>
+
 Never abbreviate or simplify content to the point of information loss.
 Write in a professional, engaging style that retains the essence and depth of the original content.
 """,
@@ -38,8 +52,20 @@ For each item, include a thorough description covering ALL main points, key insi
 Do not abbreviate or simplify to the point of information loss - capture the full depth of each article.
 Use clear hierarchical headings, properly formatted paragraphs, and bullet points for readability.
 Be thorough, factual, objective, and comprehensive in your coverage.
-ALWAYS include "Read more" links with the original URLs for each article or section you summarize.
-Format "Read more" links as HTML: <a href="URL">Read more</a>
+
+CRITICALLY IMPORTANT - READ MORE LINKS:
+* After EACH SECTION you summarize, you MUST include links to the source content
+* Format links with DESCRIPTIVE text: <a href="URL">Read more from [Publication/Source Name]</a>
+* NEVER just use "Read more" - always include the source name in the link text
+* Every section MUST end with at least one source link
+* If a section has multiple sources, include multiple links with different source names
+* NEVER omit these source links - they are REQUIRED for each section
+* Each link should appear on its own line after the relevant content
+* Examples of good link text:
+  - <a href="URL">Read more from The Verge</a>
+  - <a href="URL">Full article on TechCrunch</a>
+  - <a href="URL">Original post on Substack</a>
+
 Write in a professional, engaging style that makes complex topics accessible without sacrificing detail.
 Never omit significant information - your summary should reflect the full depth and breadth of the original content.
 """
@@ -160,65 +186,30 @@ class SummaryGenerator:
         # Store the is_root_domain function for other methods to use
         self.is_root_domain = is_root_domain
         
-        # First pass: Calculate total content length from all sources
-        for item in processed_content:
-            item_total_length = 0
-            
-            # If item is a ProcessedContent object, use get_processed_content method to access content
-            if hasattr(item, 'get_processed_content'):
-                db_item = item.get_processed_content()
-                if isinstance(db_item, dict):
-                    item = db_item
-                elif isinstance(db_item, str) and len(db_item) > 100:
-                    # If we got a large string, use it directly as content
-                    item = {'content': db_item, 'source': item.source}
-            
-            # Check main content
+        # Sort items by date if available, otherwise preserve original order
+        sorted_content = sorted(
+            processed_content,
+            key=lambda x: x.get('date', ''),
+            reverse=True  # Most recent first
+        )
+        
+        # First pass: calculate total content length and count meaningful items
+        for item in sorted_content:
+            # Skip items with no content
             content = item.get('content', '')
-            if isinstance(content, str):
-                item_total_length += len(content)
+            if not content or not isinstance(content, str):
+                continue
             
-            # Check for raw HTML content which might be stored directly
-            html_content = item.get('html', '')
-            if isinstance(html_content, str) and len(html_content) > len(content):
-                item_total_length = max(item_total_length, len(html_content))
-                # Replace the content with HTML for better processing
-                if len(html_content) > 1000:  # Only if it's substantial HTML
-                    try:
-                        from bs4 import BeautifulSoup
-                        soup = BeautifulSoup(html_content, 'html.parser')
-                        text_content = soup.get_text(separator='\n', strip=True)
-                        # Use the HTML text if it's longer/better than current content
-                        if len(text_content) > len(content):
-                            item['content'] = text_content
-                            logger.info(f"Extracted {len(text_content)} chars from HTML for item {item.get('source', 'Unknown')}")
-                    except Exception as e:
-                        logger.warning(f"Error extracting text from HTML: {e}")
+            # Calculate the total length of this item including any articles
+            item_total_length = len(content)
             
-            # Check original email content
-            if 'original_email' in item and isinstance(item['original_email'], dict):
-                email_content = item['original_email'].get('content', '')
-                if isinstance(email_content, str):
-                    item_total_length = max(item_total_length, len(email_content))
-                    
-                # Also check HTML in original email
-                email_html = item['original_email'].get('html', '')
-                if isinstance(email_html, str) and len(email_html) > 1000:
-                    try:
-                        from bs4 import BeautifulSoup
-                        soup = BeautifulSoup(email_html, 'html.parser')
-                        email_text = soup.get_text(separator='\n', strip=True)
-                        if len(email_text) > len(item.get('content', '')):
-                            item['content'] = email_text
-                            logger.info(f"Using original email HTML content: {len(email_text)} chars")
-                    except Exception as e:
-                        logger.warning(f"Error extracting text from email HTML: {e}")
-            
-            # Check articles
-            for article in item.get('articles', []):
-                if isinstance(article, dict) and isinstance(article.get('content'), str):
-                    article_content = article.get('content', '')
-                    item_total_length += len(article_content)
+            # Count article content if present
+            if 'articles' in item and isinstance(item['articles'], list):
+                for article in item['articles']:
+                    if isinstance(article, dict) and 'content' in article:
+                        article_content = article.get('content', '')
+                        if isinstance(article_content, str):
+                            item_total_length += len(article_content)
             
             # If this item has meaningful content, count it
             if item_total_length > min_content_length:
@@ -248,33 +239,22 @@ class SummaryGenerator:
                                 if article_url not in item['urls']:
                                     item['urls'].append(article_url)
         
+        # Check if we have any meaningful content
         if not has_meaningful_content:
-            logger.error("No meaningful content found in processed items")
-            # Create a clear message about the empty content
-            empty_message = "NO MEANINGFUL NEWSLETTER CONTENT TO SUMMARIZE\n\n"
-            empty_message += f"Received {len(processed_content)} content items, but none contained meaningful text.\n"
-            empty_message += "Content sources:\n"
-            for item in processed_content:
-                source = item.get('source', 'Unknown')
-                content_len = len(item.get('content', '')) if isinstance(item.get('content', ''), str) else 0
-                empty_message += f"- {source}: {content_len} characters\n"
-            return empty_message
+            logger.error("No meaningful content found for summarization")
+            return "NO MEANINGFUL CONTENT AVAILABLE FOR SUMMARIZATION"
         
-        logger.info(f"Found {meaningful_items} meaningful content items with total length of {total_content_length} characters")
+        # Estimate available characters for the content based on typical token sizes
+        # Anthropic models can handle 200k tokens total, but we need space for prompt and response
+        # 1 token is roughly 4 characters in English text
+        max_tokens = 150000  # Reserve 50k tokens for prompt overhead and response
+        available_chars = max_tokens * 4  # Approx 600k characters
         
-        # Second pass: Format content for summary
-        # Calculate available tokens for each item
-        max_tokens = self.max_tokens  # Use value from config
-        token_margin = 1000  # Leave some margin for prompt and response
-        available_tokens = max_tokens - token_margin
-        
-        # Rough estimate: 1 token ≈ 4 characters on average
-        chars_per_token = 4
-        available_chars = available_tokens * chars_per_token
+        logger.info(f"Prepared content for summary: {total_content_length} characters, ~{total_content_length // 4} tokens")
         
         if total_content_length <= available_chars:
             # If total content fits within token limit, include everything
-            for item in processed_content:
+            for item in sorted_content:
                 # Skip items with no meaningful content
                 content = item.get('content', '')
                 if not isinstance(content, str) or len(content) < min_content_length:
@@ -345,10 +325,10 @@ class SummaryGenerator:
             logger.info(f"Scaling content by factor {scale_factor:.2f} to fit token limit")
             
             # Aim to include more important content with a higher minimum scale
-            min_scale_factor = 0.5  # Ensure we include at least 50% of content
+            min_scale_factor = 0.7  # Increased from 0.5 to ensure we include at least 70% of each item
             scale_factor = max(scale_factor, min_scale_factor)  
             
-            for item in processed_content:
+            for item in sorted_content:
                 # Skip items with no meaningful content
                 content = item.get('content', '')
                 if not isinstance(content, str) or len(content) < min_content_length:
@@ -359,11 +339,19 @@ class SummaryGenerator:
                 scaled_length = int(item_length * scale_factor)
                 
                 # Ensure we include at least some of each item
-                min_scaled_length = min(1000, item_length)  # Increased minimum to 1000 chars
+                min_scaled_length = min(2000, item_length)  # Increased from 1000 to 2000 chars
                 scaled_length = max(scaled_length, min_scaled_length)
                 
-                # Truncate content to scaled length
-                truncated_content = content[:scaled_length]
+                # Use the whole content if possible, only truncate if necessary
+                if scaled_length >= item_length:
+                    truncated_content = content
+                else:
+                    # Try to truncate at a sentence boundary if possible
+                    sentence_end_pos = content.rfind('. ', 0, scaled_length)
+                    if sentence_end_pos > 0 and (scaled_length - sentence_end_pos) < 100:
+                        truncated_content = content[:sentence_end_pos+1]
+                    else:
+                        truncated_content = content[:scaled_length]
                 
                 # Format this item
                 source = item.get('source', 'Unknown Source')
@@ -410,7 +398,7 @@ class SummaryGenerator:
                 
                 formatted_item = f"==== {source} ====\n\n{truncated_content}{source_links_text}\n\n"
                 
-                # Scale and add articles if present
+                # Add articles if present - using the same scaling approach
                 for article in item.get('articles', []):
                     if isinstance(article, dict):
                         article_title = article.get('title', 'Article')
@@ -418,26 +406,34 @@ class SummaryGenerator:
                         article_url = article.get('url', '')
                         
                         if article_content and len(article_content) > min_content_length:
+                            # Apply the same scaling to article content
                             article_length = len(article_content)
                             article_scaled_length = int(article_length * scale_factor)
-                            article_min_length = min(500, article_length)  # Increased minimum
+                            article_min_length = min(1000, article_length)
                             article_scaled_length = max(article_scaled_length, article_min_length)
                             
-                            truncated_article = article_content[:article_scaled_length]
-                            article_text = f"--- {article_title} ---\n{truncated_article}\n"
+                            # Use full content or truncate as needed
+                            if article_scaled_length >= article_length:
+                                article_truncated = article_content
+                            else:
+                                # Try to truncate at a sentence boundary
+                                sentence_end = article_content.rfind('. ', 0, article_scaled_length)
+                                if sentence_end > 0 and (article_scaled_length - sentence_end) < 100:
+                                    article_truncated = article_content[:sentence_end+1]
+                                else:
+                                    article_truncated = article_content[:article_scaled_length]
+                            
+                            article_text = f"--- {article_title} ---\n{article_truncated}\n"
                             if article_url and not is_root_domain(article_url):
                                 article_text += f"URL: {article_url}\n"
                             formatted_item += article_text + "\n"
                 
                 formatted_content.append(formatted_item)
         
-        # Combine all formatted content
-        combined_content = "\n".join(formatted_content)
+        # Join all formatted items together
+        result = "\n".join(formatted_content)
         
-        # Log the final content length
-        logger.info(f"Prepared content for summary: {len(combined_content)} characters, ~{len(combined_content) // chars_per_token} tokens")
-        
-        return combined_content
+        return result
     
     def _create_summary_prompt(self, content, system_prompt=None):
         """Create a prompt for Claude summarization."""
@@ -606,15 +602,15 @@ class SummaryGenerator:
     def combine_summaries(self, summaries):
         """Combine multiple summaries into one comprehensive summary."""
         if not summaries:
-            return ""
+            return "No summaries to combine"
         
         if len(summaries) == 1:
             return summaries[0]
         
-        # Format the summaries with separators
+        # Format the summaries for combining
         formatted_content = ""
         for i, summary in enumerate(summaries):
-            formatted_content += f"\n{'==='*20}\n{summary}\n{'==='*20}\n\n"
+            formatted_content += f"=== SUMMARY BATCH {i+1} ===\n\n{summary}\n\n"
         
         try:
             # Call Claude API with the combined prompt
@@ -626,13 +622,27 @@ Your task is to combine multiple newsletter summaries into one comprehensive sum
 The summaries below are from different batches of newsletters that have been processed separately.
 Please combine these summaries into a single coherent summary that:
 
-1. Eliminates redundancy between the different summaries
-2. Organizes information by topic, not by summary batch
-3. Preserves all important information from each summary
-4. Maintains a clear structure with section headers
-5. Keeps all relevant links
-6. Improves the overall flow and readability""",
-                "user": f"Please combine these newsletter summaries into one comprehensive summary:\n\n{formatted_content}"
+1. PRESERVES ALL UNIQUE CONTENT from each summary - this is the most critical requirement
+2. Eliminates redundancy between the different summaries
+3. Organizes information by topic, not by summary batch
+4. Every distinct idea, concept, fact, statistic, or insight MUST be represented in your combined summary
+5. Maintains a clear structure with section headers
+6. PRESERVES ALL SOURCE LINKS - CRITICALLY IMPORTANT!
+7. Improves the overall flow and readability
+
+CRITICALLY IMPORTANT - SOURCE LINKS:
+* You MUST preserve ALL links from the original summaries
+* Each section in your combined summary MUST end with the relevant source links
+* NEVER remove or omit these links - they are REQUIRED for each section of content
+* Keep the DESCRIPTIVE link text exactly as it appears in the original summaries
+* Examples of good link text:
+  - <a href="URL">Read more from The Verge</a>
+  - <a href="URL">Full article on TechCrunch</a>
+  - <a href="URL">Original post on Substack</a>
+
+NEVER omit unique information - it's far better to be thorough and comprehensive than concise.
+If in doubt about whether content is unique or redundant, INCLUDE IT to ensure no information is lost.""",
+                "user": f"Please combine these newsletter summaries into one comprehensive summary that preserves ALL unique content, ideas, and source links with their descriptive text from each batch:\n\n{formatted_content}"
             }
             combined_summary = self._call_claude_api(combined_prompt)
             return combined_summary
@@ -785,7 +795,7 @@ Please combine these summaries into a single coherent summary that:
             logger.error(f"Error unwrapping tracking URL {url}: {e}", exc_info=True)
             return None
 
-    def filter_urls(self, urls, max_urls=20):
+    def filter_urls(self, urls, max_urls=50):
         """Filter URLs to remove tracking links and root domains.
         
         Args:
@@ -809,12 +819,11 @@ Please combine these summaries into a single coherent summary that:
         filtered = []
         filtered_count = 0
         
-        # Define problematic domains to filter out
+        # Reduce the list of problematic domains to only filter tracking/media domains
         problematic_domains = [
-            'beehiiv.com', 'media.beehiiv.com', 'link.mail.beehiiv.com',
-            'mailchimp.com', 'substack.com', 'bytebytego.com',
-            'sciencealert.com', 'leapfin.com', 'cutt.ly',
-            'genai.works', 'link.genai.works'
+            'media.beehiiv.com', 'link.mail.beehiiv.com',
+            'mailchimp.com',
+            'link.genai.works'
         ]
         
         for url in unique_urls:
@@ -830,15 +839,15 @@ Please combine these summaries into a single coherent summary that:
             from urllib.parse import urlparse
             parsed_url = urlparse(url)
             
-            # Skip if it's a problematic domain and just a root
+            # Skip if it's a problematic tracking domain
             domain = parsed_url.netloc.lower()
-            if any(domain.endswith(prob) for prob in problematic_domains) and self.is_root_domain(url):
+            if any(domain.endswith(prob) for prob in problematic_domains):
                 # Log only the first few filtered URLs to avoid log spam
                 filtered_count += 1
                 if filtered_count <= 3:
-                    logger.info(f"Filtering out root domain URL: {url}")
+                    logger.info(f"Filtering out tracking domain URL: {url}")
                 elif filtered_count == 4:
-                    logger.info(f"Filtering out additional root domain URLs (limiting log output)")
+                    logger.info(f"Filtering out additional tracking domain URLs (limiting log output)")
                 continue
             
             filtered.append(url)
