@@ -158,7 +158,7 @@ def get_default_config():
         },
         "llm": {
             "anthropic_api_key": "",
-            "model": "claude-3-7-sonnet-20250219",
+            "model": "claude-sonnet-4-20250514",
             "max_tokens": 4000,
             "temperature": 0.3
         }

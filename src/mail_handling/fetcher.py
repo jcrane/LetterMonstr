@@ -41,20 +41,29 @@ class EmailFetcher:
         self._mail = None  # Store the IMAP connection
     
     def connect(self):
-        """Connect to the IMAP server."""
-        max_retries = 3
+        """Connect to the IMAP server with robust retry logic."""
+        max_retries = 5  # Increased retries for after-wake scenarios
         retry_delay = 5  # seconds
+        
+        # Close any existing stale connection first
+        if self._mail:
+            try:
+                self._mail.logout()
+            except:
+                pass
+            self._mail = None
         
         for attempt in range(max_retries):
             try:
                 logger.info(f"Connecting to {self.server}:{self.port} (attempt {attempt+1}/{max_retries})")
-                # Create an IMAP4 class with SSL
-                self._mail = imaplib.IMAP4_SSL(self.server, self.port)
+                
+                # Create an IMAP4 class with SSL and longer timeout
+                self._mail = imaplib.IMAP4_SSL(self.server, self.port, timeout=30)
                 
                 # Login to the server
                 self._mail.login(self.email, self.password)
                 
-                logger.info(f"Successfully connected to {self.server}")
+                logger.info(f"✓ Successfully connected to {self.server}")
                 return self._mail
                 
             except socket.gaierror as e:
@@ -62,8 +71,18 @@ class EmailFetcher:
                 if attempt < max_retries - 1:
                     logger.info(f"Retrying connection in {retry_delay} seconds...")
                     time.sleep(retry_delay)
+                    retry_delay *= 1.5  # Exponential backoff
                 else:
                     logger.error(f"Failed to connect after {max_retries} attempts")
+                    raise
+            
+            except socket.timeout as e:
+                logger.error(f"Connection timeout: {e}")
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying connection in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 1.5
+                else:
                     raise
                     
             except Exception as e:
@@ -71,6 +90,7 @@ class EmailFetcher:
                 if attempt < max_retries - 1:
                     logger.info(f"Retrying connection in {retry_delay} seconds...")
                     time.sleep(retry_delay)
+                    retry_delay *= 1.5
                 else:
                     raise
     
@@ -85,14 +105,24 @@ class EmailFetcher:
                 return self.connect()
             
             # Try a simple NOOP command to check connection
-            status, response = mail.noop()
-            if status == 'OK':
-                return mail
-            else:
-                logger.warning("Connection check failed, attempting to reconnect")
+            try:
+                status, response = mail.noop()
+                if status == 'OK':
+                    logger.debug("IMAP connection verified")
+                    return mail
+                else:
+                    logger.warning("Connection check failed, attempting to reconnect")
+                    self._mail = None  # Clear stale connection
+                    return self.connect()
+            except (imaplib.IMAP4.abort, socket.error, socket.timeout, OSError) as e:
+                # Connection is dead, need to reconnect
+                logger.warning(f"Connection dead ({type(e).__name__}), reconnecting...")
+                self._mail = None
                 return self.connect()
+                
         except Exception as e:
             logger.warning(f"Connection error: {e}, attempting to reconnect")
+            self._mail = None
             return self.connect()
     
     def fetch_new_emails(self):

@@ -754,10 +754,56 @@ def reset_incorrectly_summarized_content(session=None):
         logger.error(f"Error resetting summarized content: {e}", exc_info=True)
         return 0
 
+def validate_connections_ready():
+    """Validate that all required connections are ready before running tasks.
+    
+    Returns:
+        bool: True if connections are ready, False otherwise
+    """
+    try:
+        # Check network connectivity
+        import socket
+        try:
+            socket.gethostbyname('gmail.com')
+        except socket.gaierror:
+            logger.warning("Network not ready - DNS resolution failed")
+            return False
+        
+        # Test IMAP connection
+        config = load_config()
+        try:
+            from src.mail_handling.fetcher import EmailFetcher
+            fetcher = EmailFetcher(config['email'])
+            # Try to connect
+            mail = fetcher.connect()
+            if mail:
+                # Close it immediately, we just wanted to test
+                try:
+                    mail.logout()
+                except:
+                    pass
+                logger.info("✓ IMAP connection validated")
+                return True
+            else:
+                logger.warning("IMAP connection failed")
+                return False
+        except Exception as e:
+            logger.warning(f"IMAP connection validation failed: {e}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error validating connections: {e}", exc_info=True)
+        return False
+
 @db_retry(max_retries=5)
 def run_periodic_tasks():
     """Run periodic tasks for fetching emails and generating summaries."""
     logger.info("Running periodic tasks...")
+    
+    # Validate connections are ready before proceeding
+    if not validate_connections_ready():
+        logger.warning("⚠️  Connections not ready, skipping this run")
+        return
     
     # Load configuration
     config = load_config()
@@ -775,12 +821,39 @@ def run_periodic_tasks():
         logger.info("Checking if it's time to generate and send a summary...")
         generate_and_send_summary(force=False)
         
-        logger.info("Periodic tasks completed successfully")
+        logger.info("✓ Periodic tasks completed successfully")
     except Exception as e:
-        logger.error(f"Error running periodic tasks: {e}", exc_info=True)
+        logger.error(f"❌ Error running periodic tasks: {e}", exc_info=True)
+
+def check_network_ready(max_wait_seconds=30):
+    """Check if network is ready after wake, with timeout.
+    
+    Args:
+        max_wait_seconds: Maximum time to wait for network
+        
+    Returns:
+        bool: True if network is ready, False if timeout
+    """
+    import socket
+    
+    start_time = time.time()
+    logger.info("Checking network readiness...")
+    
+    while (time.time() - start_time) < max_wait_seconds:
+        try:
+            # Try to resolve a common DNS name
+            socket.gethostbyname('gmail.com')
+            logger.info("Network is ready")
+            return True
+        except socket.gaierror:
+            # Network not ready yet, wait a bit
+            time.sleep(2)
+    
+    logger.warning(f"Network not ready after {max_wait_seconds} seconds")
+    return False
 
 def setup_scheduler():
-    """Set up the scheduler based on configuration."""
+    """Set up the scheduler based on configuration with robust sleep recovery."""
     # Load configuration
     config = load_config()
     
@@ -807,55 +880,93 @@ def setup_scheduler():
     # Run immediately once
     run_periodic_tasks()
     
-    # Keep the scheduler running
-    logger.info("Starting scheduler")
+    # Keep the scheduler running with enhanced sleep detection
+    logger.info("Starting scheduler with sleep/wake detection")
     last_check_time = time.time()
+    consecutive_errors = 0
+    max_consecutive_errors = 3
     
     while True:
         try:
             current_time = time.time()
             time_diff = current_time - last_check_time
             
-            # If more than 5 minutes have passed since last check,
-            # it's likely the system was sleeping
-            if time_diff > 300:  # 5 minutes in seconds
-                logger.info(f"Detected possible system sleep: {time_diff:.1f} seconds since last check")
-                logger.info("Running periodic tasks immediately to catch up")
+            # If more than 3 minutes have passed since last check,
+            # it's likely the system was sleeping (reduced from 5 for faster detection)
+            if time_diff > 180:  # 3 minutes in seconds
+                logger.warning(f"⚠️  SLEEP DETECTED: {time_diff:.1f} seconds ({time_diff/60:.1f} minutes) since last check")
                 
-                # Run all tasks immediately to catch up after sleep
-                run_periodic_tasks()
+                # Wait for network to be ready before attempting recovery
+                logger.info("Waiting for network to be ready after wake...")
+                network_ready = check_network_ready(max_wait_seconds=30)
                 
-                # Reset the scheduler to ensure jobs run correctly going forward
+                if not network_ready:
+                    logger.error("Network not ready after wake, will retry on next cycle")
+                    last_check_time = time.time()
+                    time.sleep(60)
+                    continue
+                
+                # Give the system a moment to fully stabilize
+                logger.info("Network ready, waiting 5 seconds for system to stabilize...")
+                time.sleep(5)
+                
+                logger.info("🔄 Running recovery tasks after wake...")
+                
+                # Clear and reset the scheduler
                 schedule.clear()
+                logger.info("Cleared old scheduler jobs")
                 
-                # Re-setup the scheduler
+                # Re-setup the scheduler with fresh jobs
                 if fetch_interval == 1:
                     schedule.every().hour.do(run_periodic_fetch)
-                    logger.info("Re-scheduled fetch and process to run every hour after sleep")
+                    logger.info("✓ Re-scheduled fetch and process to run every hour")
                 else:
                     schedule.every(fetch_interval).hours.do(run_periodic_fetch)
-                    logger.info(f"Re-scheduled fetch and process to run every {fetch_interval} hours after sleep")
+                    logger.info(f"✓ Re-scheduled fetch and process to run every {fetch_interval} hours")
                 
                 # Re-schedule summary check
                 schedule.every(15).minutes.do(generate_and_send_summary)
-                logger.info("Re-scheduled summary check to run every 15 minutes after sleep")
+                logger.info("✓ Re-scheduled summary check to run every 15 minutes")
                 
                 # Calculate and log how many scheduled runs were missed
                 missed_fetch_runs = int(time_diff / (fetch_interval * 3600))
                 missed_summary_checks = int(time_diff / (15 * 60))
                 
                 if missed_fetch_runs > 0 or missed_summary_checks > 0:
-                    logger.info(f"Estimated missed runs during sleep: {missed_fetch_runs} fetch runs, {missed_summary_checks} summary checks")
+                    logger.info(f"📊 Estimated missed runs during sleep: {missed_fetch_runs} fetch runs, {missed_summary_checks} summary checks")
+                
+                # Run tasks immediately to catch up after sleep
+                logger.info("🚀 Running catch-up tasks after sleep...")
+                try:
+                    run_periodic_tasks()
+                    logger.info("✓ Catch-up tasks completed successfully")
+                    consecutive_errors = 0  # Reset error counter on success
+                except Exception as e:
+                    logger.error(f"❌ Error running catch-up tasks: {e}", exc_info=True)
+                    # Don't fail completely, just log and continue
+                
+                logger.info("✓ Sleep recovery completed")
             
             # Normal scheduler operation
             schedule.run_pending()
             last_check_time = time.time()
+            consecutive_errors = 0  # Reset error counter on successful cycle
             time.sleep(60)
             
         except Exception as e:
-            logger.error(f"Error in scheduler loop: {e}", exc_info=True)
-            # Wait before trying again to avoid excessive error logging
-            time.sleep(300)  # Wait 5 minutes before retrying
+            consecutive_errors += 1
+            logger.error(f"❌ Error in scheduler loop (attempt {consecutive_errors}/{max_consecutive_errors}): {e}", exc_info=True)
+            
+            # If we've had too many consecutive errors, something is seriously wrong
+            if consecutive_errors >= max_consecutive_errors:
+                logger.critical(f"💥 Too many consecutive errors ({consecutive_errors}), system may need restart")
+                # Wait longer before retrying
+                time.sleep(600)  # Wait 10 minutes before retrying
+                consecutive_errors = 0  # Reset to give it another chance
+            else:
+                # Wait before trying again to avoid excessive error logging
+                time.sleep(120)  # Wait 2 minutes before retrying
+            
             # Update last_check_time even after an error
             last_check_time = time.time()
 

@@ -1,14 +1,16 @@
 # LetterMonstr
 
-A personal newsletter aggregator and summarizer for macOS that processes email newsletters and generates concise summaries using Claude 3.7 Sonnet.
+A personal newsletter aggregator and summarizer for macOS that processes email newsletters and generates concise summaries using Claude Sonnet 4.
 
 ## Features
 
 - Fetches newsletters from a Gmail account
 - Processes forwarded emails and extracts links
-- Generates summaries using Claude 3.7 Sonnet
+- Generates summaries using Claude Sonnet 4
 - Delivers summaries at configurable intervals (daily, weekly, or monthly)
 - Filters out advertisements and duplicate content
+- **Robust sleep/wake handling** - automatically recovers after laptop sleep
+- **Optional LaunchAgent service** - runs automatically with crash recovery
 
 ## Requirements
 
@@ -90,13 +92,31 @@ A personal newsletter aggregator and summarizer for macOS that processes email n
 
 ## Key Commands
 
-- **Start service**: `./run_lettermonstr.sh`
-- **Check status**: `./status_lettermonstr.sh`
-- **Stop service**: `./stop_lettermonstr.sh`
-- **View latest summary**: `./view_latest_summary.sh`
-- **Force summary generation**: `./force_summary.sh`
-- **Reset database**: `./reset_database.py`
-- **Generate test newsletter**: `python test_newsletter.py`
+### Quick Reference
+
+| Command | Description |
+|---------|-------------|
+| `./install_service.sh` | **Install as LaunchAgent service** (recommended for laptops - auto-restart & sleep recovery) |
+| `./run_lettermonstr.sh` | Run traditionally (manual start) |
+| `./status_lettermonstr.sh` | Check status of any running instance |
+| `./stop_lettermonstr.sh` | Stop any running instance (LaunchAgent or traditional) |
+| `./restart_service.sh` | Restart LaunchAgent service |
+| `./uninstall_service.sh` | Remove LaunchAgent service completely |
+| `./view_latest_summary.sh` | View the most recent summary |
+| `./force_summary.sh` | Force generate a summary now |
+| `./test_sleep_recovery.sh` | Test/diagnose sleep/wake handling |
+
+### Utility Commands
+
+- **Reset database**: `python3 utils/db_tools/reset_database.py`
+- **Generate test newsletter**: `python3 utils/debug/test_newsletter.py`
+- **View logs**: `tail -f data/lettermonstr_periodic.log`
+
+### Documentation
+
+- **Sleep/Wake Guide**: [SLEEP_WAKE_HANDLING.md](SLEEP_WAKE_HANDLING.md) - Detailed info on sleep/wake recovery
+- **Quick Start**: [QUICK_START_SLEEP_FIX.md](QUICK_START_SLEEP_FIX.md) - Get running in 2 minutes
+- **Technical Details**: [SLEEP_WAKE_FIX_SUMMARY.md](SLEEP_WAKE_FIX_SUMMARY.md) - What was fixed
 
 ## Troubleshooting
 

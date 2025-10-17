@@ -9,6 +9,7 @@ LOG_FILE="data/lettermonstr_runner.log"
 PERIODIC_LOG_FILE="data/lettermonstr_periodic_runner.log"
 APP_LOG_FILE="data/lettermonstr.log"
 PERIODIC_APP_LOG_FILE="data/lettermonstr_periodic.log"
+LAUNCHAGENT_PLIST="$HOME/Library/LaunchAgents/com.lettermonster.periodic.plist"
 
 # Ensure we're in the project directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -140,6 +141,26 @@ except Exception as e:
 echo "LetterMonstr Status Check"
 echo "======================="
 
+# Check for LaunchAgent service first
+any_running=false
+if [ -f "$LAUNCHAGENT_PLIST" ]; then
+    if launchctl list | grep -q "com.lettermonster.periodic"; then
+        PID=$(launchctl list | grep lettermonster | awk '{print $1}')
+        echo "✓ LaunchAgent Service: RUNNING"
+        if [ "$PID" != "-" ]; then
+            echo "  Process ID: $PID"
+            echo "  Running since: $(ps -o lstart= -p $PID 2>/dev/null || echo 'Unknown')"
+        fi
+        any_running=true
+    else
+        echo "○ LaunchAgent Service: INSTALLED but not running"
+    fi
+    echo ""
+else
+    echo "○ LaunchAgent Service: NOT INSTALLED"
+    echo ""
+fi
+
 # Check periodic fetching configuration
 is_periodic_enabled
 periodic_enabled=$?
@@ -147,11 +168,12 @@ periodic_enabled=$?
 if [ $periodic_enabled -eq 0 ]; then
     echo "Periodic fetching is enabled in configuration."
     
-    echo -e "\n--- Periodic Fetcher Status ---"
+    echo -e "\n--- Periodic Fetcher Status (PID-based) ---"
     check_process_status "$PERIODIC_PID_FILE" "LetterMonstr Periodic Fetcher"
     periodic_status=$?
     
     if [ $periodic_status -eq 0 ]; then
+        any_running=true
         show_logs "$PERIODIC_LOG_FILE" "$PERIODIC_APP_LOG_FILE" "Periodic Fetcher"
     fi
 else
@@ -162,6 +184,7 @@ else
     traditional_status=$?
     
     if [ $traditional_status -eq 0 ]; then
+        any_running=true
         show_logs "$LOG_FILE" "$APP_LOG_FILE" "LetterMonstr"
     fi
 fi
@@ -169,6 +192,20 @@ fi
 # Show database info for both cases
 show_db_info
 
-# Provide instruction to user
-echo -e "\nTo stop LetterMonstr, run: ./stop_lettermonstr.sh"
-echo "To start LetterMonstr, run: ./run_lettermonstr.sh" 
+# Provide instructions to user
+echo -e "\n=================================================="
+if [ "$any_running" = "true" ]; then
+    echo "Status: RUNNING"
+    echo ""
+    echo "To stop: ./stop_lettermonstr.sh"
+    if [ -f "$LAUNCHAGENT_PLIST" ]; then
+        echo "To restart service: ./restart_service.sh"
+    fi
+else
+    echo "Status: NOT RUNNING"
+    echo ""
+    echo "To start:"
+    echo "  LaunchAgent service: ./install_service.sh"
+    echo "  Traditional mode:    ./run_lettermonstr.sh"
+fi
+echo "==================================================" 

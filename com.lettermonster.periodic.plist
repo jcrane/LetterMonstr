@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Service identifier -->
+    <key>Label</key>
+    <string>com.lettermonster.periodic</string>
+    
+    <!-- Program to run -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/jeremycrane/Documents/Dev/lettermonster/venv/bin/python3</string>
+        <string>/Users/jeremycrane/Documents/Dev/lettermonster/src/periodic_runner.py</string>
+    </array>
+    
+    <!-- Working directory -->
+    <key>WorkingDirectory</key>
+    <string>/Users/jeremycrane/Documents/Dev/lettermonster</string>
+    
+    <!-- Run at load (startup) -->
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <!-- Keep the process alive - restart if it crashes -->
+    <key>KeepAlive</key>
+    <dict>
+        <!-- Restart if the process exits abnormally -->
+        <key>SuccessfulExit</key>
+        <false/>
+        <!-- Also restart after system wake -->
+        <key>NetworkState</key>
+        <true/>
+    </dict>
+    
+    <!-- Restart delay if process crashes -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    
+    <!-- Standard output and error logs -->
+    <key>StandardOutPath</key>
+    <string>/Users/jeremycrane/Documents/Dev/lettermonster/data/launchd_stdout.log</string>
+    
+    <key>StandardErrorPath</key>
+    <string>/Users/jeremycrane/Documents/Dev/lettermonster/data/launchd_stderr.log</string>
+    
+    <!-- Environment variables -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    
+    <!-- Nice level (lower priority so it doesn't hog resources) -->
+    <key>Nice</key>
+    <integer>5</integer>
+    
+</dict>
+</plist>
+
