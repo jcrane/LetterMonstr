@@ -57,9 +57,9 @@ summary:
 llm:
   # API key for Anthropic
   anthropic_api_key: ""  # Fill with your Anthropic API key
-  # Model to use
-  model: "claude-sonnet-4-20250514"
+  # Model to use (Claude 4.5 Sonnet is the latest and most capable model)
+  model: "claude-4-5-sonnet-20241022"
   # Maximum tokens for each summary (increased for more detailed summaries)
-  max_tokens: 8000
+  max_tokens: 16000
   # Temperature setting (0.0-1.0)
   temperature: 0.5  # Increased from 0.3 for more comprehensive responses 
