@@ -423,27 +423,13 @@ def generate_and_send_summary(force=False, session=None):
         time_diff = abs((current_time - todays_delivery_time).total_seconds() / 60)
         is_delivery_window = time_diff <= 15
         
-        # Only check for recent summaries if we're not in the delivery window
-        if not is_delivery_window and not force:
-            # Check if we've already sent a summary for recent content
-            today = datetime.now().date()
-            recent_summaries = session.query(Summary).filter(
-                Summary.sent == True,
-                Summary.creation_date >= today
-            ).order_by(Summary.creation_date.desc()).first()
-            
-            # If we found a recent summary, just mark the content as summarized and exit
-            if recent_summaries is not None:
-                logger.info(f"Recent summary (ID: {recent_summaries.id}) already covers current content. Marking content as summarized.")
-                for item in unsummarized:
-                    item.is_summarized = True
-                session.commit()
-                logger.info(f"Marked {len(unsummarized)} content items as summarized without sending new summary")
-                return
-        elif is_delivery_window:
+        # Log the delivery window status
+        if is_delivery_window:
             logger.info(f"In delivery window (±15 minutes of {delivery_hour:02d}:{delivery_minute:02d}), will generate and send summary")
         elif force:
             logger.info("Force flag is set, will generate and send summary regardless of previous summaries")
+        else:
+            logger.info("Generating summary based on unsummarized content availability")
         
         # Flag to determine if we need to generate a new summary
         generate_new_summary = True
