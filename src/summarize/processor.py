@@ -24,15 +24,15 @@ class ContentProcessor:
     def __init__(self, config):
         """Initialize processor with configuration."""
         self.config = config
-        # Less aggressive similarity threshold for deduplication
-        self.similarity_threshold = 0.85  # Increased from lower value to require higher similarity
+        # More aggressive similarity threshold for cross-summary deduplication
+        self.similarity_threshold = 0.80  # Lowered to catch more similar content (80% similarity)
         # Minimum content length to consider for processing
         self.min_content_length = 100
         self.ad_keywords = config.get('ad_keywords', [])
-        self.title_similarity_threshold = 0.95  # Raised to require very high title similarity
+        self.title_similarity_threshold = 0.90  # Lowered to catch more similar titles (90% similarity)
         self.db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 
                                 'data', 'lettermonstr.db')
-        self.cross_summary_lookback_days = 14  # Increased from 7 to 14 days for better deduplication
+        self.cross_summary_lookback_days = 7  # Check last 7 days of summaries for duplicates
     
     def _generate_content_fingerprint(self, content):
         """Generate a fingerprint for content to use in deduplication.
@@ -126,11 +126,19 @@ class ContentProcessor:
             merged_count = len(processed_items) - len(deduplicated_items)
             logger.info(f"Preserved {len(deduplicated_items)} unique items, merged {merged_count} similar items")
             
-            # Count sources
-            source_count = len(set(item.get('source', '') for item in deduplicated_items))
-            logger.info(f"After deduplication: {len(deduplicated_items)} unique items from {source_count} sources")
+            # Filter out content that was already summarized in recent summaries
+            logger.info("Checking for previously summarized content...")
+            filtered_items = self._filter_previously_summarized(deduplicated_items)
             
-            return deduplicated_items
+            if len(filtered_items) < len(deduplicated_items):
+                skipped = len(deduplicated_items) - len(filtered_items)
+                logger.info(f"Filtered out {skipped} items that were already in recent summaries")
+            
+            # Count sources
+            source_count = len(set(item.get('source', '') for item in filtered_items))
+            logger.info(f"After deduplication and cross-summary filtering: {len(filtered_items)} unique items from {source_count} sources")
+            
+            return filtered_items
             
         except Exception as e:
             logger.error(f"Error in process_and_deduplicate: {e}", exc_info=True)
@@ -194,10 +202,13 @@ class ContentProcessor:
                         content_match = True
                         break
                 
-                # Skip if BOTH title AND content are similar to historical content
-                # This is a more balanced deduplication approach requiring both matches
-                if (title_match and len(title) > 5) and content_match:
-                    logger.info(f"Skipping previously summarized content (title and content match): {title}")
+                # Skip if title OR content match (aggressive deduplication)
+                # If either the title is very similar OR the content is very similar, consider it a duplicate
+                if (title_match and len(title) > 10) or content_match:
+                    match_reason = "title" if title_match else "content"
+                    if title_match and content_match:
+                        match_reason = "title and content"
+                    logger.info(f"Skipping previously summarized content ({match_reason} match): {title}")
                     skipped_items += 1
                     continue
                 
@@ -216,7 +227,10 @@ class ContentProcessor:
     def store_summarized_content(self, summary_id, content_items):
         """Store the content signatures of items that have been summarized."""
         if not summary_id or not content_items:
+            logger.warning("Cannot store summarized content: missing summary_id or content_items")
             return
+        
+        logger.info(f"Storing {len(content_items)} content signatures for summary ID {summary_id}")
         
         # Maximum retry attempts for database operations
         max_retries = 5
@@ -275,6 +289,7 @@ class ContentProcessor:
             for attempt in range(max_retries):
                 try:
                     session.commit()
+                    logger.info(f"Successfully stored {len(content_items)} content signatures for future deduplication")
                     break
                 except OperationalError as e:
                     if "database is locked" in str(e).lower() and attempt < max_retries - 1:
