@@ -32,12 +32,13 @@ Your summary should be well-structured with proper headings, paragraphs, bullet 
 
 CRITICALLY IMPORTANT - READ MORE LINKS:
 * After EACH SECTION you summarize, you MUST include links to the source content
+* Each content item has a **PRIMARY SOURCE URL** marked clearly - USE THIS as your main "Read more" link
 * Format links with DESCRIPTIVE text: <a href="URL">Read more from [Publication/Source Name]</a>
 * NEVER just use "Read more" - always include the source name in the link text
-* Every section MUST end with at least one source link
-* If a section has multiple sources, include multiple links with different source names
+* If additional source URLs are listed, create separate "Read more" links for each distinct topic/article
 * NEVER omit these source links - they are REQUIRED for each section
 * Each link should appear on its own line after the relevant content
+* ONLY use specific article URLs - NEVER use homepage or root domain URLs
 * Examples of good link text:
   - <a href="URL">Read more from The Verge</a>
   - <a href="URL">Full article on TechCrunch</a>
@@ -55,12 +56,13 @@ Be thorough, factual, objective, and comprehensive in your coverage.
 
 CRITICALLY IMPORTANT - READ MORE LINKS:
 * After EACH SECTION you summarize, you MUST include links to the source content
+* Each content item has a **PRIMARY SOURCE URL** marked clearly - USE THIS as your main "Read more" link
 * Format links with DESCRIPTIVE text: <a href="URL">Read more from [Publication/Source Name]</a>
 * NEVER just use "Read more" - always include the source name in the link text
-* Every section MUST end with at least one source link
-* If a section has multiple sources, include multiple links with different source names
+* If additional source URLs are listed, create separate "Read more" links for each distinct topic/article
 * NEVER omit these source links - they are REQUIRED for each section
 * Each link should appear on its own line after the relevant content
+* ONLY use specific article URLs - NEVER use homepage or root domain URLs
 * Examples of good link text:
   - <a href="URL">Read more from The Verge</a>
   - <a href="URL">Full article on TechCrunch</a>
@@ -264,44 +266,66 @@ class SummaryGenerator:
                 source = item.get('source', 'Unknown Source')
                 
                 # Extract URLs from the content or item for "Read more" links
-                source_links = []
+                # Prioritize URLs: item url -> article urls -> extracted urls
+                primary_url = None
+                secondary_urls = []
                 
-                # Try to find URLs in the item
+                # Try to find the primary URL (most specific)
                 if 'url' in item and item['url'] and not is_root_domain(item['url']):
-                    source_links.append(item['url'])
+                    primary_url = item['url']
                 
-                # Get URLs from the item if we extracted them earlier
-                if 'urls' in item and item['urls']:
-                    for url in item['urls']:
-                        if url not in source_links and not is_root_domain(url):
-                            source_links.append(url)
-                
-                # Check for URLs in articles
+                # Check for URLs in articles (these are often the actual content URLs)
                 if 'articles' in item and isinstance(item['articles'], list):
                     for article in item['articles']:
                         if isinstance(article, dict) and 'url' in article and article['url']:
                             article_url = article['url']
-                            if not is_root_domain(article_url) and article_url not in source_links:
-                                source_links.append(article_url)
+                            if not is_root_domain(article_url):
+                                if not primary_url:
+                                    primary_url = article_url
+                                elif article_url != primary_url:
+                                    secondary_urls.append(article_url)
                 
-                # Extract URLs from the content using regex
-                if isinstance(content, str):
+                # Get additional URLs from the item if we extracted them earlier
+                if 'urls' in item and item['urls']:
+                    for url in item['urls']:
+                        if not is_root_domain(url):
+                            if not primary_url:
+                                primary_url = url
+                            elif url not in [primary_url] + secondary_urls:
+                                secondary_urls.append(url)
+                
+                # Extract URLs from the content using regex (last resort)
+                if isinstance(content, str) and not primary_url:
                     import re
                     url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
                     content_urls = re.findall(url_pattern, content)
                     content_urls = self.filter_urls(content_urls)
                     for url in content_urls:
-                        if url not in source_links:
-                            source_links.append(url)
+                        if not is_root_domain(url):
+                            if not primary_url:
+                                primary_url = url
+                            elif url not in [primary_url] + secondary_urls:
+                                secondary_urls.append(url)
                 
-                # Format the source links section
+                # Format the source links section with clear PRIMARY URL
                 source_links_text = ""
-                if source_links:
-                    source_links_text = "\n\nSOURCE LINKS:\n"
-                    for url in source_links:
-                        # Remove tracking parameters
-                        clean_url = url.split('?')[0] if '?' in url else url
-                        source_links_text += f"- {clean_url}\n"
+                if primary_url:
+                    # Remove tracking parameters
+                    clean_url = primary_url.split('?')[0] if '?' in primary_url else primary_url
+                    source_links_text = f"\n\n**PRIMARY SOURCE URL (USE THIS FOR 'READ MORE' LINK):**\n{clean_url}\n"
+                    
+                    # Add secondary URLs if present (limit to 3 most relevant)
+                    if secondary_urls:
+                        clean_secondary = []
+                        for url in secondary_urls[:3]:  # Limit to 3 additional URLs
+                            clean_url = url.split('?')[0] if '?' in url else url
+                            if clean_url not in clean_secondary:
+                                clean_secondary.append(clean_url)
+                        
+                        if clean_secondary:
+                            source_links_text += "\nAdditional source URLs:\n"
+                            for url in clean_secondary:
+                                source_links_text += f"- {url}\n"
                 
                 formatted_item = f"==== {source} ====\n\n{content}{source_links_text}\n\n"
                 
@@ -357,44 +381,66 @@ class SummaryGenerator:
                 source = item.get('source', 'Unknown Source')
                 
                 # Extract URLs from the content or item for "Read more" links
-                source_links = []
+                # Prioritize URLs: item url -> article urls -> extracted urls
+                primary_url = None
+                secondary_urls = []
                 
-                # Try to find URLs in the item
+                # Try to find the primary URL (most specific)
                 if 'url' in item and item['url'] and not is_root_domain(item['url']):
-                    source_links.append(item['url'])
+                    primary_url = item['url']
                 
-                # Get URLs from the item if we extracted them earlier
-                if 'urls' in item and item['urls']:
-                    for url in item['urls']:
-                        if url not in source_links and not is_root_domain(url):
-                            source_links.append(url)
-                            
-                # Check for URLs in articles
+                # Check for URLs in articles (these are often the actual content URLs)
                 if 'articles' in item and isinstance(item['articles'], list):
                     for article in item['articles']:
                         if isinstance(article, dict) and 'url' in article and article['url']:
                             article_url = article['url']
-                            if not is_root_domain(article_url) and article_url not in source_links:
-                                source_links.append(article_url)
+                            if not is_root_domain(article_url):
+                                if not primary_url:
+                                    primary_url = article_url
+                                elif article_url != primary_url:
+                                    secondary_urls.append(article_url)
                 
-                # Extract URLs from the content using regex
-                if isinstance(content, str):
+                # Get additional URLs from the item if we extracted them earlier
+                if 'urls' in item and item['urls']:
+                    for url in item['urls']:
+                        if not is_root_domain(url):
+                            if not primary_url:
+                                primary_url = url
+                            elif url not in [primary_url] + secondary_urls:
+                                secondary_urls.append(url)
+                
+                # Extract URLs from the content using regex (last resort)
+                if isinstance(content, str) and not primary_url:
                     import re
                     url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
                     content_urls = re.findall(url_pattern, content)
                     content_urls = self.filter_urls(content_urls)
                     for url in content_urls:
-                        if url not in source_links:
-                            source_links.append(url)
+                        if not is_root_domain(url):
+                            if not primary_url:
+                                primary_url = url
+                            elif url not in [primary_url] + secondary_urls:
+                                secondary_urls.append(url)
                 
-                # Format the source links section
+                # Format the source links section with clear PRIMARY URL
                 source_links_text = ""
-                if source_links:
-                    source_links_text = "\n\nSOURCE LINKS:\n"
-                    for url in source_links:
-                        # Remove tracking parameters
-                        clean_url = url.split('?')[0] if '?' in url else url
-                        source_links_text += f"- {clean_url}\n"
+                if primary_url:
+                    # Remove tracking parameters
+                    clean_url = primary_url.split('?')[0] if '?' in primary_url else primary_url
+                    source_links_text = f"\n\n**PRIMARY SOURCE URL (USE THIS FOR 'READ MORE' LINK):**\n{clean_url}\n"
+                    
+                    # Add secondary URLs if present (limit to 3 most relevant)
+                    if secondary_urls:
+                        clean_secondary = []
+                        for url in secondary_urls[:3]:  # Limit to 3 additional URLs
+                            clean_url = url.split('?')[0] if '?' in url else url
+                            if clean_url not in clean_secondary:
+                                clean_secondary.append(clean_url)
+                        
+                        if clean_secondary:
+                            source_links_text += "\nAdditional source URLs:\n"
+                            for url in clean_secondary:
+                                source_links_text += f"- {url}\n"
                 
                 formatted_item = f"==== {source} ====\n\n{truncated_content}{source_links_text}\n\n"
                 

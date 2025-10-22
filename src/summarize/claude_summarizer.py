@@ -45,14 +45,16 @@ HTML OUTPUT FORMAT - EXTREMELY CRITICAL:
 10. DO NOT mix HTML with markdown formatting - use HTML tags EXCLUSIVELY.
 
 URL HANDLING - EXTREMELY IMPORTANT:
-1. ALWAYS include "Read more" links after each article or section you summarize using proper HTML: <a href="URL" class="read-more">Read more</a>
-2. ONLY use SPECIFIC ARTICLE URLs that point to actual content pages, not homepage/root domains.
-3. DO NOT use links to root domains like "bytebytego.com" or "sciencealert.com" without specific paths to articles.
-4. DO NOT use tracking or redirect URLs from beehiiv.com, mailchimp.com, substack.com, etc.
-5. For each article you summarize, locate its SOURCE URL in the content and use that specific article URL.
-6. If an article does not have a specific URL, simply omit the "Read more" link rather than linking to a root domain.
-7. Position each "Read more" link on its own line after the relevant content summary.
-8. Format all links with proper HTML: <a href="https://specific-article-url.com/path/to/article" class="read-more">Read more</a>
+1. ALWAYS include "Read more" links after each article or section you summarize using proper HTML: <a href="URL" class="read-more">Read more from [Source Name]</a>
+2. Each content item will have a **PRIMARY SOURCE URL (USE THIS FOR 'READ MORE' LINK):** - USE THIS URL as your main "Read more" link
+3. If additional source URLs are provided, you can create separate "Read more" links for each significant topic using those additional URLs
+4. ONLY use SPECIFIC ARTICLE URLs that point to actual content pages, not homepage/root domains
+5. DO NOT use links to root domains like "bytebytego.com" or "sciencealert.com" without specific paths to articles
+6. DO NOT use tracking or redirect URLs from beehiiv.com, mailchimp.com, substack.com, etc.
+7. If an article does not have a specific URL marked as PRIMARY, simply omit the "Read more" link rather than guessing or using a root domain
+8. Position each "Read more" link on its own line after the relevant content summary
+9. Format all links with proper HTML and descriptive text: <a href="https://specific-article-url.com/path/to/article" class="read-more">Read more from TechCrunch</a>
+10. When multiple URLs are provided for a content block, create a separate "Read more" link for each distinct topic/article covered
 
 EXAMPLE OF CORRECT HTML FORMAT:
 <h1>AI and Technology Newsletter Summary</h1>
