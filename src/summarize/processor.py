@@ -8,6 +8,7 @@ import logging
 import difflib
 import os
 import hashlib
+import re
 from datetime import datetime, timedelta
 import copy
 import json
@@ -18,22 +19,92 @@ from src.database.models import get_session, SummarizedContent, EmailContent
 
 logger = logging.getLogger(__name__)
 
+# Common newsletter boilerplate patterns to skip when fingerprinting
+_BOILERPLATE_PATTERNS = [
+    r'^(hi|hey|hello|dear|good morning|good afternoon)[\s,]',
+    r'^(welcome to|thanks for reading|thank you for)',
+    r'^(view (this|in) (your )?browser)',
+    r'^(forward(ed)? (this )?email)',
+    r'^(unsubscribe|manage (your )?preferences)',
+    r'^(sent via|powered by)',
+]
+_BOILERPLATE_RE = re.compile('|'.join(_BOILERPLATE_PATTERNS), re.IGNORECASE)
+
+
 class ContentProcessor:
     """Processes and deduplicates content from different sources."""
     
     def __init__(self, config):
         """Initialize processor with configuration."""
         self.config = config
-        # More aggressive similarity threshold for cross-summary deduplication
-        self.similarity_threshold = 0.80  # Lowered to catch more similar content (80% similarity)
-        # Minimum content length to consider for processing
+        self.similarity_threshold = 0.85
         self.min_content_length = 100
         self.ad_keywords = config.get('ad_keywords', [])
-        self.title_similarity_threshold = 0.90  # Lowered to catch more similar titles (90% similarity)
+        self.title_similarity_threshold = 0.90
         self.db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 
                                 'data', 'lettermonstr.db')
-        self.cross_summary_lookback_days = 7  # Check last 7 days of summaries for duplicates
+        self.cross_summary_lookback_days = 5
     
+    def _extract_content_title(self, item):
+        """Extract an actual article/story title from the content item.
+        
+        Looks for the first meaningful heading or sentence in the content rather
+        than using the email sender/source name, which is useless for dedup.
+        
+        Returns:
+            str: Best-effort title extracted from the content itself.
+        """
+        content = item.get('content', '') if isinstance(item, dict) else ''
+        if not content or not isinstance(content, str):
+            return item.get('title', item.get('source', ''))
+
+        # Try the explicit title field first (some items set this to the article headline)
+        explicit_title = item.get('title', '')
+        if explicit_title and explicit_title != item.get('source', '') and len(explicit_title) > 10:
+            return explicit_title.strip()
+
+        for line in content.split('\n'):
+            line = line.strip()
+            if not line or len(line) < 10:
+                continue
+            if _BOILERPLATE_RE.match(line):
+                continue
+            # Skip lines that are mostly URLs
+            if line.startswith('http') or line.count('http') > 1:
+                continue
+            # Use the first meaningful line (capped at 255 chars)
+            return line[:255]
+
+        return item.get('title', item.get('source', ''))
+
+    def _extract_meaningful_fingerprint(self, content, max_length=1500):
+        """Extract a content fingerprint that skips newsletter boilerplate.
+        
+        Scans past greeting lines, headers, and common newsletter preamble to
+        find the substantive body text for fingerprinting.
+        """
+        if not content or not isinstance(content, str):
+            return ''
+
+        lines = content.split('\n')
+        meaningful_lines = []
+        chars_collected = 0
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if chars_collected == 0 and _BOILERPLATE_RE.match(stripped):
+                continue
+            if chars_collected == 0 and len(stripped) < 20:
+                continue
+            meaningful_lines.append(stripped)
+            chars_collected += len(stripped)
+            if chars_collected >= max_length:
+                break
+
+        return '\n'.join(meaningful_lines)[:max_length]
+
     def _generate_content_fingerprint(self, content):
         """Generate a fingerprint for content to use in deduplication.
         
@@ -46,11 +117,10 @@ class ContentProcessor:
         if not content or not isinstance(content, str):
             return hashlib.md5("empty_content".encode('utf-8')).hexdigest()
             
-        # Take the first 1000 characters to create a fingerprint
-        # This is enough to identify duplicate content without using the full text
-        fingerprint_text = content[:1000]
+        fingerprint_text = self._extract_meaningful_fingerprint(content)
+        if not fingerprint_text:
+            fingerprint_text = content[:1000]
         
-        # Create a hash of the text
         return hashlib.md5(fingerprint_text.encode('utf-8')).hexdigest()
     
     def process_and_deduplicate(self, items):
@@ -146,76 +216,89 @@ class ContentProcessor:
             return []
     
     def _filter_previously_summarized(self, items):
-        """Filter out content that has already been included in previous summaries."""
+        """Filter out content that has already been included in previous summaries.
+        
+        Uses a conservative approach: content is only skipped when there is high
+        confidence it is truly a duplicate (exact hash match, or content body match
+        at 85% similarity).  Title similarity alone is not enough because the same
+        sender name would incorrectly match unrelated stories.
+        """
         if not items:
             return []
             
-        # Open database session
         session = get_session(self.db_path)
         try:
-            # Calculate date threshold for historical content
             threshold_date = datetime.now() - timedelta(days=self.cross_summary_lookback_days)
             
-            # Get all content fingerprints from recent summaries
             historical_content = session.query(SummarizedContent).filter(
                 SummarizedContent.date_summarized >= threshold_date
             ).all()
             
             logger.info(f"Found {len(historical_content)} historical content items from last {self.cross_summary_lookback_days} days")
             
-            historical_fingerprints = [item.content_fingerprint for item in historical_content if item.content_fingerprint]
-            historical_titles = [item.content_title for item in historical_content if item.content_title]
-            historical_hashes = set([item.content_hash for item in historical_content if item.content_hash])
+            historical_fingerprints = [h.content_fingerprint for h in historical_content if h.content_fingerprint]
+            historical_titles = [h.content_title for h in historical_content if h.content_title]
+            historical_hashes = set(h.content_hash for h in historical_content if h.content_hash)
             
-            # Filter out content that has already been summarized
             filtered_items = []
             skipped_items = 0
             
             for item in items:
-                # Extract title
-                title = item.get('source', '')
-                if 'Fwd: ' in title:
-                    title = title.split('Fwd: ', 1)[1]
+                title = self._extract_content_title(item)
+                source = item.get('source', '')
                 
-                # Create content fingerprint and hash
                 content = item.get('content', '')
-                fingerprint = content[:1000] if content else ''  # Use first 1000 chars as fingerprint
+                fingerprint = self._extract_meaningful_fingerprint(content)
+                if not fingerprint:
+                    fingerprint = content[:1000] if content else ''
+                
                 content_hash = hashlib.md5((title + fingerprint[:100]).encode('utf-8')).hexdigest()
                 
-                # Check for exact hash match first (most reliable)
+                # 1) Exact hash match — most reliable
                 if content_hash in historical_hashes:
-                    logger.info(f"Skipping previously summarized content (exact hash match): {title}")
+                    logger.info(f"Skipping previously summarized content (exact hash match): {title[:80]} [{source}]")
                     skipped_items += 1
                     continue
                 
-                # Check for title similarity with historical content
-                title_match = False
-                for hist_title in historical_titles:
-                    if self._is_similar_title(title, hist_title):
-                        title_match = True
-                        break
-                
-                # Check for content similarity with historical content
+                # 2) Content-body similarity (the strongest semantic signal we have
+                #    without an LLM call — the LLM prompt handles the rest)
                 content_match = False
                 for hist_fingerprint in historical_fingerprints:
                     if self._is_similar(fingerprint, hist_fingerprint):
                         content_match = True
                         break
                 
-                # Skip if title OR content match (aggressive deduplication)
-                # If either the title is very similar OR the content is very similar, consider it a duplicate
-                if (title_match and len(title) > 10) or content_match:
-                    match_reason = "title" if title_match else "content"
-                    if title_match and content_match:
-                        match_reason = "title and content"
-                    logger.info(f"Skipping previously summarized content ({match_reason} match): {title}")
+                if content_match:
+                    logger.info(f"Skipping previously summarized content (content match): {title[:80]} [{source}]")
                     skipped_items += 1
                     continue
                 
-                # Otherwise, include it
+                # 3) Title match is only used as a tiebreaker when the title is
+                #    clearly an article headline (not a sender name) and the content
+                #    lengths are within 500 chars of each other — prevents removing
+                #    genuinely new stories from the same newsletter sender.
+                title_match = False
+                if len(title) > 15:
+                    for hist_title in historical_titles:
+                        if self._is_similar_title(title, hist_title):
+                            title_match = True
+                            break
+                
+                if title_match:
+                    item_len = len(content) if isinstance(content, str) else 0
+                    similar_length = False
+                    for hist_fp in historical_fingerprints:
+                        if abs(len(hist_fp) - min(item_len, 1500)) < 500:
+                            similar_length = True
+                            break
+                    if similar_length:
+                        logger.info(f"Skipping previously summarized content (title + length match): {title[:80]} [{source}]")
+                        skipped_items += 1
+                        continue
+                
                 filtered_items.append(item)
             
-            logger.info(f"Cross-summary deduplication: {len(items)} items → {len(filtered_items)} items (skipped {skipped_items})")
+            logger.info(f"Cross-summary deduplication: {len(items)} items -> {len(filtered_items)} items (skipped {skipped_items})")
             return filtered_items
             
         except Exception as e:
@@ -232,7 +315,6 @@ class ContentProcessor:
         
         logger.info(f"Storing {len(content_items)} content signatures for summary ID {summary_id}")
         
-        # Maximum retry attempts for database operations
         max_retries = 5
         retry_delay = 0.5
         
@@ -241,51 +323,43 @@ class ContentProcessor:
         session = get_session(db_path)
         
         try:
-            # Disable autoflush to prevent premature database operations
             with session.no_autoflush:
                 for item in content_items:
-                    # Use existing hash if available
                     content_hash = item.get('content_hash')
                     if not content_hash:
-                        # Generate hash for this content
                         para_hash = self._generate_content_hash(item)
                     else:
                         para_hash = content_hash
                         
-                    # Get the title
-                    title = item.get('title', item.get('source', ''))
+                    title = self._extract_content_title(item)
                     
-                    # Generate a fingerprint (summary) of the content
-                    fingerprint = item.get('content', '')[:1000]  # Use first 1000 chars as fingerprint
+                    content = item.get('content', '')
+                    fingerprint = self._extract_meaningful_fingerprint(content)
+                    if not fingerprint:
+                        fingerprint = content[:1000] if content else ''
                     
-                    # Only store if this hash doesn't exist
                     for attempt in range(max_retries):
                         try:
-                            # Check if this content has already been summarized
                             existing = session.query(SummarizedContent).filter_by(content_hash=para_hash).first()
                             
                             if not existing:
-                                # Store the signature
                                 summarized = SummarizedContent(
                                     content_hash=para_hash,
-                                    content_title=title[:255] if title else '',  # Truncate to fit column
+                                    content_title=title[:255] if title else '',
                                     content_fingerprint=fingerprint,
                                     summary_id=summary_id,
                                     date_summarized=datetime.now()
                                 )
                                 session.add(summarized)
-                            break  # Success, exit retry loop
+                            break
                         except OperationalError as e:
                             if "database is locked" in str(e).lower() and attempt < max_retries - 1:
-                                # Database is locked, try again after a delay
-                                wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                                wait_time = retry_delay * (2 ** attempt)
                                 logger.warning(f"Database locked when checking content hash, retrying in {wait_time:.2f}s (attempt {attempt+1}/{max_retries})")
                                 time.sleep(wait_time)
                             else:
-                                # Re-raise if not a lock error or we've exhausted retries
                                 raise
             
-            # Commit in a separate retry loop to handle commit-time locks
             for attempt in range(max_retries):
                 try:
                     session.commit()
@@ -293,12 +367,10 @@ class ContentProcessor:
                     break
                 except OperationalError as e:
                     if "database is locked" in str(e).lower() and attempt < max_retries - 1:
-                        # Database is locked, try again after a delay
-                        wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                        wait_time = retry_delay * (2 ** attempt)
                         logger.warning(f"Database locked during commit, retrying in {wait_time:.2f}s (attempt {attempt+1}/{max_retries})")
                         time.sleep(wait_time)
                     else:
-                        # Re-raise if not a lock error or we've exhausted retries
                         raise
         except Exception as e:
             logger.error(f"Error storing summarized content signatures: {e}", exc_info=True)
@@ -696,16 +768,13 @@ class ContentProcessor:
 
     def _generate_content_hash(self, item):
         """Generate a hash for content to detect duplicates."""
-        # Extract title
-        title = item.get('title', item.get('source', ''))
-        if 'Fwd: ' in title:
-            title = title.split('Fwd: ', 1)[1]
+        title = self._extract_content_title(item)
         
-        # Create content fingerprint
         content = item.get('content', '')
-        fingerprint = content[:1000] if content else ''  # Use first 1000 chars as fingerprint
+        fingerprint = self._extract_meaningful_fingerprint(content)
+        if not fingerprint:
+            fingerprint = content[:1000] if content else ''
         
-        # Create a unique hash for this content
         content_hash = hashlib.md5((title + fingerprint[:100]).encode('utf-8')).hexdigest()
         
-        return content_hash 
+        return content_hash

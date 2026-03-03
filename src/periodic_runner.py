@@ -553,11 +553,18 @@ def generate_and_send_summary(force=False, session=None):
                     # Combine all batch summaries
                     if batch_summaries:
                         logger.info(f"Combining {len(batch_summaries)} batch summaries...")
-                        if len(batch_summaries) == 1:
-                            summary_text = batch_summaries[0]
+                        # Extract summary text from dicts returned by generate_summary
+                        summary_texts = []
+                        for s in batch_summaries:
+                            if isinstance(s, dict):
+                                summary_texts.append(s.get('summary', str(s)))
+                            else:
+                                summary_texts.append(s)
+                        
+                        if len(summary_texts) == 1:
+                            summary_text = summary_texts[0]
                         else:
-                            # Use the dedicated method to combine summaries
-                            summary_text = summary_generator.combine_summaries(batch_summaries)
+                            summary_text = summary_generator.combine_summaries(summary_texts)
                         logger.info("Combined summary created successfully")
                     else:
                         raise Exception("No batch summaries were generated")

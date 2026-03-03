@@ -8,7 +8,7 @@ import os
 import logging
 import time
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from anthropic import Anthropic
 import hashlib
 import re
@@ -20,23 +20,41 @@ logger = logging.getLogger(__name__)
 
 # Define the system prompts for different summary formats
 LLM_SYSTEM_PROMPTS = {
-    'newsletter': """You are an expert email summarizer that creates comprehensive, detailed summaries of newsletter content. 
-DO NOT LOSE ANY UNIQUE CONTENT OR IDEAS when summarizing. Your primary goal is COMPREHENSIVE COVERAGE.
-Extract ALL key information, insights, and main points from the provided content.
-Be extremely thorough - every distinct concept, idea, example, statistic, or insight MUST be represented in your summary.
-NEVER omit or truncate important content - include all significant information and unique ideas.
+    'newsletter': """You are an expert email summarizer that creates CONCISE, HIGH-LEVEL summaries of newsletter content. 
+Your primary goal is to provide a QUICK OVERVIEW that helps users quickly understand what's important.
+Extract only the ESSENTIAL key information, critical insights, and main findings from the provided content.
+Be BRIEF and TO THE POINT - focus on high-level information, not exhaustive details.
+Keep each section to 2-4 sentences covering only the most important points.
 Organize the summary by category or topic, with clear headings.
-Be thorough, factual, objective, and comprehensive in your coverage.
-Include all important details, statistics, quotes, and unique information from each source.
+Be factual, objective, and concise in your coverage.
+Focus on WHAT happened and WHY it matters - users can click links for full details.
 Your summary should be well-structured with proper headings, paragraphs, bullet points, and clear formatting.
 
+CONTENT PRIORITIZATION - EXTREMELY IMPORTANT:
+* PRIORITIZE: AI product developments, new AI capabilities, technology breakthroughs, new tools and platforms
+* EMPHASIZE: Product launches, feature releases, technical innovations, research breakthroughs, new capabilities
+* MINIMIZE: Funding rounds, venture capital investments, company valuations, and general financial news
+* INCLUDE BUT LIMIT: Only major acquisitions and transformative financial deals that significantly impact the industry
+* When covering financial news, focus on the strategic and technological implications rather than the financial details
+* Keep ALL summaries CONCISE - even prioritized content should be high-level overviews (2-4 sentences max per topic)
+* Remember: The goal is a quick scan to identify what's worth reading in full, not comprehensive coverage
+
+WITHIN-BATCH CONSOLIDATION - VERY IMPORTANT:
+* Multiple content items in this batch may cover the SAME story or event from different sources.
+* When you detect that two or more items are reporting on the same underlying news, CONSOLIDATE them into ONE summary section.
+* In the consolidated section, include ALL unique perspectives, details, and angles from every source — never drop a unique fact just because another source also covered the story.
+* Include ALL source links from every consolidated item so the reader can explore each source.
+* Do NOT repeat the same story in multiple sections.
+
 CRITICALLY IMPORTANT - READ MORE LINKS:
 * After EACH SECTION you summarize, you MUST include links to the source content
 * Each content item has a **PRIMARY SOURCE URL** marked clearly - USE THIS as your main "Read more" link
+* If a section is marked with **ALL ADDITIONAL SOURCE URLs**, you MUST include ALL of those URLs in your summary
+* When you combine multiple content items into a single summary section, you MUST include ALL links from ALL the aggregated items
 * Format links with DESCRIPTIVE text: <a href="URL">Read more from [Publication/Source Name]</a>
 * NEVER just use "Read more" - always include the source name in the link text
-* If additional source URLs are listed, create separate "Read more" links for each distinct topic/article
-* NEVER omit these source links - they are REQUIRED for each section
+* If multiple source URLs are provided for a section, create separate "Read more" links for EACH URL
+* NEVER omit source links - they are REQUIRED for each section
 * Each link should appear on its own line after the relevant content
 * ONLY use specific article URLs - NEVER use homepage or root domain URLs
 * Examples of good link text:
@@ -44,15 +62,31 @@ CRITICALLY IMPORTANT - READ MORE LINKS:
   - <a href="URL">Full article on TechCrunch</a>
   - <a href="URL">Original post on Substack</a>
 
-Never abbreviate or simplify content to the point of information loss.
-Write in a professional, engaging style that retains the essence and depth of the original content.
+Be concise while preserving critical high-level information and key findings.
+Write in a professional, engaging style that provides a quick overview - users can click links for full details.
 """,
-    'weekly': """You are an expert email summarizer that creates comprehensive weekly digests of newsletter content.
+    'weekly': """You are an expert email summarizer that creates CONCISE weekly digests of newsletter content.
 Organize the summary by clear categories (Technology, Business, Science, etc.) with descriptive headings.
-For each item, include a thorough description covering ALL main points, key insights, and important details.
-Do not abbreviate or simplify to the point of information loss - capture the full depth of each article.
+For each item, include a BRIEF high-level overview covering only the ESSENTIAL main points and key findings.
+Keep each section to 2-4 sentences - focus on what matters most, not exhaustive details.
 Use clear hierarchical headings, properly formatted paragraphs, and bullet points for readability.
-Be thorough, factual, objective, and comprehensive in your coverage.
+Be factual, objective, and concise in your coverage.
+
+CONTENT PRIORITIZATION - EXTREMELY IMPORTANT:
+* PRIORITIZE: AI product developments, new AI capabilities, technology breakthroughs, new tools and platforms
+* EMPHASIZE: Product launches, feature releases, technical innovations, research breakthroughs, new capabilities
+* MINIMIZE: Funding rounds, venture capital investments, company valuations, and general financial news
+* INCLUDE BUT LIMIT: Only major acquisitions and transformative financial deals that significantly impact the industry
+* When covering financial news, focus on the strategic and technological implications rather than the financial details
+* Keep ALL summaries CONCISE - even prioritized content should be high-level overviews (2-4 sentences max per topic)
+* Remember: The goal is a quick scan to identify what's worth reading in full, not comprehensive coverage
+
+WITHIN-BATCH CONSOLIDATION - VERY IMPORTANT:
+* Multiple content items in this batch may cover the SAME story or event from different sources.
+* When you detect that two or more items are reporting on the same underlying news, CONSOLIDATE them into ONE summary section.
+* In the consolidated section, include ALL unique perspectives, details, and angles from every source — never drop a unique fact just because another source also covered the story.
+* Include ALL source links from every consolidated item so the reader can explore each source.
+* Do NOT repeat the same story in multiple sections.
 
 CRITICALLY IMPORTANT - READ MORE LINKS:
 * After EACH SECTION you summarize, you MUST include links to the source content
@@ -68,8 +102,8 @@ CRITICALLY IMPORTANT - READ MORE LINKS:
   - <a href="URL">Full article on TechCrunch</a>
   - <a href="URL">Original post on Substack</a>
 
-Write in a professional, engaging style that makes complex topics accessible without sacrificing detail.
-Never omit significant information - your summary should reflect the full depth and breadth of the original content.
+Write in a professional, engaging style that makes complex topics accessible through concise high-level overviews.
+Focus on key findings and essential information - users can click links to explore the full depth of any topic.
 """
 }
 
@@ -89,14 +123,99 @@ class SummaryGenerator:
             # Updated to work with newer Anthropic client
             self.client = Anthropic(api_key=self.api_key)
     
+    def _get_recent_topic_headlines(self, days=5):
+        """Load topic headlines from the last N days of summaries.
+        
+        Parses previous summary HTML/text to extract section headings,
+        giving Claude context about what has already been covered recently.
+        
+        Returns:
+            list[dict]: Each entry has 'topic' (str) and 'date' (str).
+        """
+        session = get_session(self.db_path)
+        try:
+            threshold = datetime.now() - timedelta(days=days)
+            recent_summaries = (
+                session.query(Summary)
+                .filter(Summary.creation_date >= threshold, Summary.sent == True)
+                .order_by(Summary.creation_date.desc())
+                .all()
+            )
+
+            if not recent_summaries:
+                return []
+
+            headlines = []
+            for summary in recent_summaries:
+                text = summary.summary_text or ''
+                date_str = summary.creation_date.strftime('%b %d') if summary.creation_date else ''
+
+                # Extract <h2> headings from HTML output
+                h2_matches = re.findall(r'<h2[^>]*>(.*?)</h2>', text, re.IGNORECASE | re.DOTALL)
+                for heading in h2_matches:
+                    clean = re.sub(r'<[^>]+>', '', heading).strip()
+                    if clean and len(clean) > 5:
+                        headlines.append({'topic': clean, 'date': date_str})
+
+                # Also try <h3> if no h2 found
+                if not h2_matches:
+                    h3_matches = re.findall(r'<h3[^>]*>(.*?)</h3>', text, re.IGNORECASE | re.DOTALL)
+                    for heading in h3_matches:
+                        clean = re.sub(r'<[^>]+>', '', heading).strip()
+                        if clean and len(clean) > 5:
+                            headlines.append({'topic': clean, 'date': date_str})
+
+                # Fallback: try markdown headings
+                if not h2_matches:
+                    md_matches = re.findall(r'^#{1,3}\s+(.+)$', text, re.MULTILINE)
+                    for heading in md_matches:
+                        clean = heading.strip()
+                        if clean and len(clean) > 5:
+                            headlines.append({'topic': clean, 'date': date_str})
+
+            # Deduplicate while preserving order
+            seen = set()
+            unique_headlines = []
+            for h in headlines:
+                key = h['topic'].lower()
+                if key not in seen:
+                    seen.add(key)
+                    unique_headlines.append(h)
+
+            logger.info(f"Extracted {len(unique_headlines)} recent topic headlines from last {days} days")
+            return unique_headlines
+
+        except Exception as e:
+            logger.error(f"Error loading recent topic headlines: {e}", exc_info=True)
+            return []
+        finally:
+            session.close()
+
+    def _build_recent_topics_context(self, headlines):
+        """Format recent topic headlines into a context block for the LLM prompt."""
+        if not headlines:
+            return ""
+
+        lines = ["RECENTLY COVERED TOPICS (last 5 days):"]
+        for h in headlines[:50]:
+            lines.append(f'- "{h["topic"]}" (covered {h["date"]})')
+
+        lines.append("")
+        lines.append("DEDUPLICATION INSTRUCTIONS:")
+        lines.append("- If a content item reports the EXACT SAME news as a recently covered topic with NO new information, SKIP it entirely — do not include it in your summary.")
+        lines.append("- If a content item has NEW information, a different perspective, or a meaningful UPDATE on a recently covered topic, include it BRIEFLY as an update, noting what is new.")
+        lines.append("- If a content item covers a topic NOT in the recent list above, include it fully.")
+        lines.append("- When multiple content items in THIS batch cover the same story, CONSOLIDATE them into one section with all unique perspectives and ALL source links.")
+        lines.append("")
+
+        return "\n".join(lines)
+
     def generate_summary(self, processed_content, format_preferences=None):
         """Generate a summary of the processed content."""
         logger.info(f"Generating summary for {len(processed_content)} content items")
         
-        # Prepare the content for summarization
         prepared_content = self._prepare_content_for_summary(processed_content)
         
-        # If there's no content, return an error message
         if prepared_content.startswith("NO CONTENT"):
             logger.error("No content available for summarization")
             return {
@@ -106,47 +225,41 @@ class SummaryGenerator:
                 "key_points": []
             }
         
-        # Log content size
         logger.info(f"Prepared content length: {len(prepared_content)} characters")
         
-        # Get summary using LLM
         format_prefs = format_preferences or {}
         summary_format = format_prefs.get('format', 'newsletter')
         
-        # Include day of week in prompt if it's a weekly format
         day_context = ""
         if summary_format == 'weekly':
             today = datetime.today()
             day_context = f"Today is {today.strftime('%A, %B %d')}. "
         
-        # Generate summary with the LLM
         system_prompt = LLM_SYSTEM_PROMPTS.get(summary_format, LLM_SYSTEM_PROMPTS['newsletter'])
         
-        # For weekly summaries, add context about the day
         if summary_format == 'weekly':
             system_prompt = day_context + system_prompt
         
-        # Adjust prompt based on content length
         content_length = len(prepared_content)
-        token_estimate = content_length // 4  # Rough estimate of tokens
+        token_estimate = content_length // 4
         
-        # For very large content, adjust the prompt to request more concise summaries
         if token_estimate > 10000:
-            system_prompt += f"\n\nNOTE: You are summarizing a very large amount of content ({content_length} characters). Focus on capturing ALL important information while maintaining readability."
+            system_prompt += f"\n\nNOTE: You are summarizing a very large amount of content ({content_length} characters). Keep your summary CONCISE and HIGH-LEVEL - focus on essential key findings only, not exhaustive details."
         
-        # Create the prompt for Claude
+        # Inject recent topic context so the LLM can skip/consolidate already-covered stories
+        recent_headlines = self._get_recent_topic_headlines(days=5)
+        recent_topics_block = self._build_recent_topics_context(recent_headlines)
+        if recent_topics_block:
+            system_prompt += "\n\n" + recent_topics_block
+        
         prompt = self._create_summary_prompt(prepared_content, system_prompt)
         
-        # Call Claude API to generate summary
         summary_text = self._call_claude_api(prompt)
         
-        # Extract title, categories, and key points
         title, categories, key_points = self._extract_metadata(summary_text)
         
-        # Remove any placeholder or assistant-style text
         summary_text = self._clean_summary(summary_text)
         
-        # Return the summary and metadata
         return {
             "summary": summary_text,
             "title": title,
@@ -175,15 +288,23 @@ class SummaryGenerator:
         def is_root_domain(url):
             if not url or not isinstance(url, str):
                 return True
+            
+            # Check if it's a tracking URL first
+            if self._is_tracking_url(url):
+                return True
                 
             # Parse the URL
             from urllib.parse import urlparse
             parsed_url = urlparse(url)
             
             # Check if it's just a root domain
-            return (not parsed_url.path or parsed_url.path == '/' or 
-                    parsed_url.path.lower() in ['/index.html', '/index.php', '/home'] or
-                    len(parsed_url.path) < 5)
+            # Require at least a meaningful path (more than just /)
+            path = parsed_url.path.strip('/')
+            return (not path or 
+                    parsed_url.path.lower() in ['/', '/index.html', '/index.php', '/home', '/homepage'] or
+                    len(path) < 5 or
+                    # Filter out common homepage patterns
+                    path.lower() in ['index', 'home', 'homepage', 'default'])
         
         # Store the is_root_domain function for other methods to use
         self.is_root_domain = is_root_domain
@@ -266,65 +387,81 @@ class SummaryGenerator:
                 source = item.get('source', 'Unknown Source')
                 
                 # Extract URLs from the content or item for "Read more" links
-                # Prioritize URLs: item url -> article urls -> extracted urls
+                # Collect ALL URLs from all sources - prioritize but don't limit
+                all_urls = []
                 primary_url = None
-                secondary_urls = []
                 
-                # Try to find the primary URL (most specific)
-                if 'url' in item and item['url'] and not is_root_domain(item['url']):
-                    primary_url = item['url']
+                # Try to find the primary URL (most specific) from item URL
+                if 'url' in item and item['url']:
+                    item_url = item['url']
+                    # Filter out tracking URLs and root domains
+                    if not self._is_tracking_url(item_url) and not is_root_domain(item_url):
+                        primary_url = item_url
+                        all_urls.append(item_url)
                 
-                # Check for URLs in articles (these are often the actual content URLs)
+                # Collect ALL URLs from articles (these are often the actual content URLs)
                 if 'articles' in item and isinstance(item['articles'], list):
                     for article in item['articles']:
                         if isinstance(article, dict) and 'url' in article and article['url']:
                             article_url = article['url']
-                            if not is_root_domain(article_url):
+                            # Filter out tracking URLs and root domains
+                            if (not self._is_tracking_url(article_url) and 
+                                not is_root_domain(article_url) and 
+                                article_url not in all_urls):
+                                all_urls.append(article_url)
+                                # Set first article URL as primary if we don't have one yet
                                 if not primary_url:
                                     primary_url = article_url
-                                elif article_url != primary_url:
-                                    secondary_urls.append(article_url)
                 
                 # Get additional URLs from the item if we extracted them earlier
                 if 'urls' in item and item['urls']:
                     for url in item['urls']:
-                        if not is_root_domain(url):
+                        # Filter out tracking URLs and root domains
+                        if (not self._is_tracking_url(url) and 
+                            not is_root_domain(url) and 
+                            url not in all_urls):
+                            all_urls.append(url)
                             if not primary_url:
                                 primary_url = url
-                            elif url not in [primary_url] + secondary_urls:
-                                secondary_urls.append(url)
                 
                 # Extract URLs from the content using regex (last resort)
-                if isinstance(content, str) and not primary_url:
+                if isinstance(content, str):
                     import re
                     url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
                     content_urls = re.findall(url_pattern, content)
                     content_urls = self.filter_urls(content_urls)
                     for url in content_urls:
-                        if not is_root_domain(url):
+                        # Filter out tracking URLs and root domains
+                        if (not self._is_tracking_url(url) and 
+                            not is_root_domain(url) and 
+                            url not in all_urls):
+                            all_urls.append(url)
                             if not primary_url:
                                 primary_url = url
-                            elif url not in [primary_url] + secondary_urls:
-                                secondary_urls.append(url)
                 
-                # Format the source links section with clear PRIMARY URL
+                # Format the source links section with clear PRIMARY URL and ALL additional URLs
                 source_links_text = ""
-                if primary_url:
-                    # Remove tracking parameters
-                    clean_url = primary_url.split('?')[0] if '?' in primary_url else primary_url
-                    source_links_text = f"\n\n**PRIMARY SOURCE URL (USE THIS FOR 'READ MORE' LINK):**\n{clean_url}\n"
+                if all_urls:
+                    # Remove tracking parameters and deduplicate
+                    clean_urls = []
+                    seen_clean = set()
+                    for url in all_urls:
+                        clean_url = url.split('?')[0] if '?' in url else url
+                        # Normalize URL for comparison (remove trailing slash)
+                        normalized = clean_url.rstrip('/')
+                        if normalized not in seen_clean and not is_root_domain(normalized):
+                            clean_urls.append(clean_url)
+                            seen_clean.add(normalized)
                     
-                    # Add secondary URLs if present (limit to 3 most relevant)
-                    if secondary_urls:
-                        clean_secondary = []
-                        for url in secondary_urls[:3]:  # Limit to 3 additional URLs
-                            clean_url = url.split('?')[0] if '?' in url else url
-                            if clean_url not in clean_secondary:
-                                clean_secondary.append(clean_url)
+                    if clean_urls:
+                        # Use first URL as primary, rest as secondary
+                        primary_clean = clean_urls[0].split('?')[0] if '?' in clean_urls[0] else clean_urls[0]
+                        source_links_text = f"\n\n**PRIMARY SOURCE URL (USE THIS FOR 'READ MORE' LINK):**\n{primary_clean}\n"
                         
-                        if clean_secondary:
-                            source_links_text += "\nAdditional source URLs:\n"
-                            for url in clean_secondary:
+                        # Include ALL remaining URLs (no limit)
+                        if len(clean_urls) > 1:
+                            source_links_text += "\n**ALL ADDITIONAL SOURCE URLs (INCLUDE ALL OF THESE IN YOUR SUMMARY):**\n"
+                            for url in clean_urls[1:]:
                                 source_links_text += f"- {url}\n"
                 
                 formatted_item = f"==== {source} ====\n\n{content}{source_links_text}\n\n"
@@ -381,65 +518,81 @@ class SummaryGenerator:
                 source = item.get('source', 'Unknown Source')
                 
                 # Extract URLs from the content or item for "Read more" links
-                # Prioritize URLs: item url -> article urls -> extracted urls
+                # Collect ALL URLs from all sources - prioritize but don't limit
+                all_urls = []
                 primary_url = None
-                secondary_urls = []
                 
-                # Try to find the primary URL (most specific)
-                if 'url' in item and item['url'] and not is_root_domain(item['url']):
-                    primary_url = item['url']
+                # Try to find the primary URL (most specific) from item URL
+                if 'url' in item and item['url']:
+                    item_url = item['url']
+                    # Filter out tracking URLs and root domains
+                    if not self._is_tracking_url(item_url) and not is_root_domain(item_url):
+                        primary_url = item_url
+                        all_urls.append(item_url)
                 
-                # Check for URLs in articles (these are often the actual content URLs)
+                # Collect ALL URLs from articles (these are often the actual content URLs)
                 if 'articles' in item and isinstance(item['articles'], list):
                     for article in item['articles']:
                         if isinstance(article, dict) and 'url' in article and article['url']:
                             article_url = article['url']
-                            if not is_root_domain(article_url):
+                            # Filter out tracking URLs and root domains
+                            if (not self._is_tracking_url(article_url) and 
+                                not is_root_domain(article_url) and 
+                                article_url not in all_urls):
+                                all_urls.append(article_url)
+                                # Set first article URL as primary if we don't have one yet
                                 if not primary_url:
                                     primary_url = article_url
-                                elif article_url != primary_url:
-                                    secondary_urls.append(article_url)
                 
                 # Get additional URLs from the item if we extracted them earlier
                 if 'urls' in item and item['urls']:
                     for url in item['urls']:
-                        if not is_root_domain(url):
+                        # Filter out tracking URLs and root domains
+                        if (not self._is_tracking_url(url) and 
+                            not is_root_domain(url) and 
+                            url not in all_urls):
+                            all_urls.append(url)
                             if not primary_url:
                                 primary_url = url
-                            elif url not in [primary_url] + secondary_urls:
-                                secondary_urls.append(url)
                 
                 # Extract URLs from the content using regex (last resort)
-                if isinstance(content, str) and not primary_url:
+                if isinstance(content, str):
                     import re
                     url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
                     content_urls = re.findall(url_pattern, content)
                     content_urls = self.filter_urls(content_urls)
                     for url in content_urls:
-                        if not is_root_domain(url):
+                        # Filter out tracking URLs and root domains
+                        if (not self._is_tracking_url(url) and 
+                            not is_root_domain(url) and 
+                            url not in all_urls):
+                            all_urls.append(url)
                             if not primary_url:
                                 primary_url = url
-                            elif url not in [primary_url] + secondary_urls:
-                                secondary_urls.append(url)
                 
-                # Format the source links section with clear PRIMARY URL
+                # Format the source links section with clear PRIMARY URL and ALL additional URLs
                 source_links_text = ""
-                if primary_url:
-                    # Remove tracking parameters
-                    clean_url = primary_url.split('?')[0] if '?' in primary_url else primary_url
-                    source_links_text = f"\n\n**PRIMARY SOURCE URL (USE THIS FOR 'READ MORE' LINK):**\n{clean_url}\n"
+                if all_urls:
+                    # Remove tracking parameters and deduplicate
+                    clean_urls = []
+                    seen_clean = set()
+                    for url in all_urls:
+                        clean_url = url.split('?')[0] if '?' in url else url
+                        # Normalize URL for comparison (remove trailing slash)
+                        normalized = clean_url.rstrip('/')
+                        if normalized not in seen_clean and not is_root_domain(normalized):
+                            clean_urls.append(clean_url)
+                            seen_clean.add(normalized)
                     
-                    # Add secondary URLs if present (limit to 3 most relevant)
-                    if secondary_urls:
-                        clean_secondary = []
-                        for url in secondary_urls[:3]:  # Limit to 3 additional URLs
-                            clean_url = url.split('?')[0] if '?' in url else url
-                            if clean_url not in clean_secondary:
-                                clean_secondary.append(clean_url)
+                    if clean_urls:
+                        # Use first URL as primary, rest as secondary
+                        primary_clean = clean_urls[0].split('?')[0] if '?' in clean_urls[0] else clean_urls[0]
+                        source_links_text = f"\n\n**PRIMARY SOURCE URL (USE THIS FOR 'READ MORE' LINK):**\n{primary_clean}\n"
                         
-                        if clean_secondary:
-                            source_links_text += "\nAdditional source URLs:\n"
-                            for url in clean_secondary:
+                        # Include ALL remaining URLs (no limit)
+                        if len(clean_urls) > 1:
+                            source_links_text += "\n**ALL ADDITIONAL SOURCE URLs (INCLUDE ALL OF THESE IN YOUR SUMMARY):**\n"
+                            for url in clean_urls[1:]:
                                 source_links_text += f"- {url}\n"
                 
                 formatted_item = f"==== {source} ====\n\n{truncated_content}{source_links_text}\n\n"
@@ -663,32 +816,43 @@ class SummaryGenerator:
             logger.info(f"Combining {len(summaries)} summaries into one")
             combined_prompt = {
                 "system": """You are a newsletter summarization assistant for the LetterMonstr application.
-Your task is to combine multiple newsletter summaries into one comprehensive summary.
+Your task is to combine multiple newsletter summaries into one CONCISE, HIGH-LEVEL summary.
 
 The summaries below are from different batches of newsletters that have been processed separately.
 Please combine these summaries into a single coherent summary that:
 
-1. PRESERVES ALL UNIQUE CONTENT from each summary - this is the most critical requirement
+1. PRESERVES ALL UNIQUE KEY FINDINGS from each summary - focus on essential high-level information
 2. Eliminates redundancy between the different summaries
 3. Organizes information by topic, not by summary batch
-4. Every distinct idea, concept, fact, statistic, or insight MUST be represented in your combined summary
+4. Each topic should be 2-4 sentences covering only the most important points
 5. Maintains a clear structure with section headers
 6. PRESERVES ALL SOURCE LINKS - CRITICALLY IMPORTANT!
-7. Improves the overall flow and readability
+7. Improves the overall flow and readability while keeping it concise
+
+CONTENT PRIORITIZATION - EXTREMELY IMPORTANT:
+* PRIORITIZE: AI product developments, new AI capabilities, technology breakthroughs, new tools and platforms
+* EMPHASIZE: Product launches, feature releases, technical innovations, research breakthroughs, new capabilities
+* MINIMIZE: Funding rounds, venture capital investments, company valuations, and general financial news
+* INCLUDE BUT LIMIT: Only major acquisitions and transformative financial deals that significantly impact the industry
+* When covering financial news, focus on the strategic and technological implications rather than the financial details
+* Keep ALL summaries CONCISE - even prioritized content should be high-level overviews (2-4 sentences max per topic)
+* Remember: The goal is a quick scan to identify what's worth reading in full, not comprehensive coverage
 
 CRITICALLY IMPORTANT - SOURCE LINKS:
 * You MUST preserve ALL links from the original summaries
-* Each section in your combined summary MUST end with the relevant source links
+* When combining multiple summaries into one section, you MUST include ALL links from ALL the aggregated content items
+* Each section in your combined summary MUST end with ALL relevant source links from all aggregated items
 * NEVER remove or omit these links - they are REQUIRED for each section of content
+* If a section aggregates content from 3 different sources, you MUST include all 3 links
 * Keep the DESCRIPTIVE link text exactly as it appears in the original summaries
 * Examples of good link text:
   - <a href="URL">Read more from The Verge</a>
   - <a href="URL">Full article on TechCrunch</a>
   - <a href="URL">Original post on Substack</a>
 
-NEVER omit unique information - it's far better to be thorough and comprehensive than concise.
-If in doubt about whether content is unique or redundant, INCLUDE IT to ensure no information is lost.""",
-                "user": f"Please combine these newsletter summaries into one comprehensive summary that preserves ALL unique content, ideas, and source links with their descriptive text from each batch:\n\n{formatted_content}"
+Keep the combined summary CONCISE and HIGH-LEVEL - focus on essential key findings, not exhaustive details.
+If in doubt about whether content is unique or redundant, include the key finding but keep it brief - users can click links for full details.""",
+                "user": f"Please combine these newsletter summaries into one CONCISE, HIGH-LEVEL summary that preserves all unique key findings and source links with their descriptive text from each batch:\n\n{formatted_content}"
             }
             combined_summary = self._call_claude_api(combined_prompt)
             return combined_summary
