@@ -40,5 +40,11 @@ data/
 *~
 
 # Application specific
-# Add the config file so that sensitive credentials aren't committed
-config/config.yaml 
+config/config.yaml
+
+# Firebase local cache
+.firebase/
+
+# Deployment-specific config (contains credentials / project IDs)
+public/env-config.js
+functions/.env
