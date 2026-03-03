@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LetterMonstr Settings</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>LetterMonstr</h1>
+      <div id="auth-area">
+        <button id="btn-sign-in" class="btn btn-primary" hidden>Sign in with Google</button>
+        <div id="user-info" hidden>
+          <span id="user-email"></span>
+          <button id="btn-sign-out" class="btn btn-secondary">Sign out</button>
+        </div>
+      </div>
+    </header>
+
+    <main id="main-content" hidden>
+      <p class="description">Manage your newsletter aggregator settings. Changes take effect on the next scheduled run.</p>
+
+      <!-- Manual Summary Trigger -->
+      <section class="card" id="section-trigger">
+        <h2>Manual Summary</h2>
+        <p class="hint">Generate and send a summary email from all unsummarized content collected so far.</p>
+        <button id="btn-trigger-summary" class="btn btn-primary">Send Summary Now</button>
+        <p id="trigger-status" class="hint" hidden></p>
+      </section>
+
+      <!-- Email / Inbox -->
+      <section class="card" id="section-email">
+        <h2>Email / Inbox</h2>
+        <form data-section="email">
+          <div class="field">
+            <label for="email-fetch_email">Fetch Email</label>
+            <input type="email" id="email-fetch_email" data-key="fetch_email">
+          </div>
+          <div class="field">
+            <label for="email-imap_server">IMAP Server</label>
+            <input type="text" id="email-imap_server" data-key="imap_server">
+          </div>
+          <div class="field">
+            <label for="email-imap_port">IMAP Port</label>
+            <input type="number" id="email-imap_port" data-key="imap_port">
+          </div>
+          <div class="field">
+            <label for="email-folders">Folders</label>
+            <input type="text" id="email-folders" data-key="folders" placeholder="INBOX, Newsletters">
+            <span class="hint">Comma-separated list</span>
+          </div>
+          <div class="field">
+            <label for="email-initial_lookback_days">Initial Lookback Days</label>
+            <input type="number" id="email-initial_lookback_days" data-key="initial_lookback_days" min="1" max="30">
+          </div>
+          <div class="field checkbox">
+            <label>
+              <input type="checkbox" id="email-periodic_fetch" data-key="periodic_fetch">
+              Periodic Fetch Enabled
+            </label>
+          </div>
+          <div class="field checkbox">
+            <label>
+              <input type="checkbox" id="email-mark_read_only_after_summary" data-key="mark_read_only_after_summary">
+              Mark Read Only After Summary
+            </label>
+          </div>
+          <button type="submit" class="btn btn-primary">Save Email Settings</button>
+        </form>
+      </section>
+
+      <!-- Summary / Delivery -->
+      <section class="card" id="section-summary">
+        <h2>Summary / Delivery</h2>
+        <form data-section="summary">
+          <div class="field">
+            <label for="summary-recipient_email">Recipient Email</label>
+            <input type="email" id="summary-recipient_email" data-key="recipient_email">
+          </div>
+          <div class="field">
+            <label for="summary-sender_email">Sender Email</label>
+            <input type="email" id="summary-sender_email" data-key="sender_email">
+          </div>
+          <div class="field">
+            <label for="summary-smtp_server">SMTP Server</label>
+            <input type="text" id="summary-smtp_server" data-key="smtp_server">
+          </div>
+          <div class="field">
+            <label for="summary-smtp_port">SMTP Port</label>
+            <input type="number" id="summary-smtp_port" data-key="smtp_port">
+          </div>
+          <div class="field">
+            <label for="summary-subject_prefix">Subject Prefix</label>
+            <input type="text" id="summary-subject_prefix" data-key="subject_prefix">
+          </div>
+          <div class="field">
+            <label for="summary-frequency">Frequency</label>
+            <select id="summary-frequency" data-key="frequency">
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="summary-delivery_time">Delivery Time (UTC)</label>
+            <input type="time" id="summary-delivery_time" data-key="delivery_time">
+          </div>
+          <button type="submit" class="btn btn-primary">Save Summary Settings</button>
+        </form>
+      </section>
+
+      <!-- LLM -->
+      <section class="card" id="section-llm">
+        <h2>LLM</h2>
+        <form data-section="llm">
+          <div class="field">
+            <label for="llm-model">Model</label>
+            <select id="llm-model" data-key="model">
+              <option value="claude-opus-4-6">Claude Opus 4.6</option>
+              <option value="claude-sonnet-4-6">Claude Sonnet 4.6</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="llm-max_tokens">Max Tokens</label>
+            <input type="number" id="llm-max_tokens" data-key="max_tokens" min="1000" max="128000" step="1000">
+          </div>
+          <div class="field">
+            <label for="llm-temperature">Temperature: <span id="temp-display">0.5</span></label>
+            <input type="range" id="llm-temperature" data-key="temperature" min="0" max="1" step="0.05">
+          </div>
+          <button type="submit" class="btn btn-primary">Save LLM Settings</button>
+        </form>
+      </section>
+
+      <!-- Content / Crawling -->
+      <section class="card" id="section-content">
+        <h2>Content / Crawling</h2>
+        <form data-section="content">
+          <div class="field">
+            <label for="content-max_links_per_email">Max Links per Email</label>
+            <input type="number" id="content-max_links_per_email" data-key="max_links_per_email" min="0" max="50">
+          </div>
+          <div class="field">
+            <label for="content-max_link_depth">Max Link Depth</label>
+            <input type="number" id="content-max_link_depth" data-key="max_link_depth" min="0" max="5">
+          </div>
+          <div class="field">
+            <label for="content-request_timeout">Request Timeout (seconds)</label>
+            <input type="number" id="content-request_timeout" data-key="request_timeout" min="1" max="60">
+          </div>
+          <div class="field">
+            <label for="content-user_agent">User Agent</label>
+            <input type="text" id="content-user_agent" data-key="user_agent">
+          </div>
+          <div class="field">
+            <label for="content-ad_keywords">Ad Keywords</label>
+            <input type="text" id="content-ad_keywords" data-key="ad_keywords" placeholder="sponsored, advertisement, ...">
+            <span class="hint">Comma-separated list</span>
+          </div>
+          <button type="submit" class="btn btn-primary">Save Content Settings</button>
+        </form>
+      </section>
+
+      <!-- Secrets -->
+      <section class="card" id="section-secrets">
+        <h2>Secrets</h2>
+        <p class="hint">Secret values are write-only. Enter a new value and click Update to change it.</p>
+        <div class="field">
+          <label for="secret-gmail">Gmail App Password</label>
+          <div class="secret-row">
+            <input type="password" id="secret-gmail" placeholder="Enter new app password">
+            <button type="button" class="btn btn-secondary" data-secret="gmail-app-password">Update</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="secret-anthropic">Anthropic API Key</label>
+          <div class="secret-row">
+            <input type="password" id="secret-anthropic" placeholder="Enter new API key">
+            <button type="button" class="btn btn-secondary" data-secret="anthropic-api-key">Update</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div id="access-denied" hidden>
+      <div class="card">
+        <h2>Access Denied</h2>
+        <p>This application is restricted. You are not authorized to access these settings.</p>
+        <button id="btn-denied-sign-out" class="btn btn-secondary">Sign out</button>
+      </div>
+    </div>
+
+    <div id="loading">
+      <div class="spinner"></div>
+      <p>Loading...</p>
+    </div>
+  </div>
+
+  <div id="toast" hidden></div>
+
+  <script src="/env-config.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

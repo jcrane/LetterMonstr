@@ -1,0 +1,15 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /settings/{doc} {
+      // DEPLOY: Replace with your authorized admin email address
+      allow read, write: if request.auth != null
+                         && request.auth.token.email == "jeremycrane@gmail.com";
+    }
+
+    match /{document=**} {
+      // Cloud Functions use Admin SDK which bypasses these rules
+      allow read, write: if false;
+    }
+  }
+}
