@@ -186,6 +186,10 @@ class SummaryGenerator:
 
         summary_text = self._call_claude_api(prompt)
 
+        if not summary_text:
+            logger.error("Claude API returned no summary")
+            return {"summary": "", "title": "", "categories": [], "key_points": []}
+
         title, categories, key_points = self._extract_metadata(summary_text)
 
         summary_text = self._clean_summary(summary_text)
@@ -255,13 +259,14 @@ If in doubt about whether content is unique or redundant, include the key findin
                     f"from each batch:\n\n{formatted_content}"
                 ),
             }
-            return self._call_claude_api(combined_prompt)
+            result = self._call_claude_api(combined_prompt)
+            if not result:
+                logger.error("Claude API returned no result for combined summary")
+                return "\n\n---\n\n".join(summaries)
+            return result
         except Exception as e:
             logger.error(f"Error combining summaries: {e}", exc_info=True)
-            fallback = "# COMBINED NEWSLETTER SUMMARY\n\n"
-            for i, summary in enumerate(summaries):
-                fallback += f"## Batch {i+1} Summary\n\n{summary}\n\n---\n\n"
-            return fallback
+            return "\n\n---\n\n".join(summaries)
 
     # ------------------------------------------------------------------
     # Recent-topics context for cross-summary dedup
@@ -547,24 +552,28 @@ If in doubt about whether content is unique or redundant, include the key findin
         }
 
     def _call_claude_api(self, prompt):
-        """Call the Claude API and return the generated text."""
+        """Call the Claude API using streaming and return the generated text.
+
+        Returns the summary text on success, or None on failure.
+        """
         try:
             logger.info(f"Calling Claude API with model {self.model} and max_tokens {self.max_tokens}")
 
             if not self.client:
                 logger.error("Claude API client is not initialized - check your API key configuration")
-                return "Error: Claude API client is not initialized. Please check your API key configuration."
+                return None
 
             system_chars = len(prompt.get('system', ''))
             user_chars = len(prompt.get('user', ''))
             logger.info(f"Prompt size: system={system_chars} chars, user={user_chars} chars")
 
-            response = self.client.messages.create(
+            with self.client.messages.stream(
                 model=self.model,
                 max_tokens=self.max_tokens,
                 system=prompt['system'],
                 messages=[{"role": "user", "content": prompt['user']}],
-            )
+            ) as stream:
+                response = stream.get_final_message()
 
             summary = response.content[0].text
             logger.info(f"Claude API responded with {len(summary)} characters")
@@ -572,7 +581,7 @@ If in doubt about whether content is unique or redundant, include the key findin
             return summary
         except Exception as e:
             logger.error(f"Error calling Claude API: {e}", exc_info=True)
-            return "Error generating summary. Please check logs for details."
+            return None
 
     # ------------------------------------------------------------------
     # Post-processing
