@@ -261,11 +261,11 @@ def _do_generate_and_send(config: dict) -> dict:
                      i + 1, len(batches), len(batch))
         result = generator.generate_summary(batch, recent_headlines=recent_headlines)
         summary_text = result.get("summary", "") if isinstance(result, dict) else str(result)
-        if summary_text:
+        if summary_text and not summary_text.startswith("Error"):
             batch_summaries.append(summary_text)
 
     if not batch_summaries:
-        logger.error("No summaries generated")
+        logger.error("No summaries generated — Claude API may have failed")
         return {"status": "generation_failed", "items_summarized": 0, "email_sent": False}
 
     final_summary = (
