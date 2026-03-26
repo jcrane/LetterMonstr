@@ -26,7 +26,6 @@ setup(
         "requests>=2.31.0",
         "beautifulsoup4>=4.12.2",
         "lxml>=4.9.3",
-        "nltk>=3.8.1",
         "python-dateutil>=2.8.2",
         "SQLAlchemy>=2.0.19",
         "pyyaml>=6.0.1",
