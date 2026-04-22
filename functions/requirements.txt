@@ -3,10 +3,10 @@ firebase-functions==0.5.0
 google-cloud-secret-manager==2.26.0
 google-cloud-firestore==2.23.0
 anthropic==0.84.0
-requests==2.32.5
+requests==2.33.0
 beautifulsoup4==4.14.3
-lxml==6.0.2
+lxml==6.1.0
 pyyaml==6.0.3
 python-dateutil==2.9.0.post0
 email-validator==2.3.0
-pytest==8.3.5
+pytest==9.0.3
