@@ -1,8 +1,8 @@
-firebase-admin==7.2.0
+firebase-admin==7.4.0
 firebase-functions==0.5.0
-google-cloud-secret-manager==2.26.0
-google-cloud-firestore==2.23.0
-anthropic==0.84.0
+google-cloud-secret-manager==2.27.0
+google-cloud-firestore==2.27.0
+anthropic==0.96.0
 requests==2.33.0
 beautifulsoup4==4.14.3
 lxml==6.1.0

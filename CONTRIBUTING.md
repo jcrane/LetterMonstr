@@ -1,177 +1,72 @@
 # Contributing to LetterMonstr
 
-Thank you for your interest in contributing to LetterMonstr! This document provides guidelines and instructions to help you contribute effectively to this project.
+LetterMonstr is a small personal project, but PRs and issues are welcome if something's useful to you. This document covers how the codebase is laid out and how to make changes safely.
 
-## Table of Contents
+## Project shape
 
-- [Code of Conduct](#code-of-conduct)
-- [Important Notes About This Project](#important-notes-about-this-project)
-- [Getting Started](#getting-started)
-- [Development Workflow](#development-workflow)
-- [Pull Request Process](#pull-request-process)
-- [Coding Guidelines](#coding-guidelines)
-- [Testing](#testing)
-- [Documentation](#documentation)
-- [Communication](#communication)
+LetterMonstr runs entirely on Firebase / Google Cloud — there is no local daemon. See `README.md` for the full deployment walkthrough.
 
-## Code of Conduct
+- `functions/` — Python 3.12 Cloud Functions (IMAP fetch, crawl, summarize, SMTP send, UI-facing HTTP endpoints)
+- `public/` — static settings UI (Firebase Hosting)
+- `firestore.rules` — admin-only access to `settings/app_config`
+- `firebase.json` — hosting + functions + CSP configuration
 
-By participating in this project, you agree to maintain a respectful and inclusive environment for everyone. Please:
+`CLAUDE.md` has a more detailed architecture summary if you're picking the project up cold.
 
-- Use welcoming and inclusive language
-- Be respectful of differing viewpoints and experiences
-- Gracefully accept constructive criticism
-- Focus on what is best for the community
-- Show empathy towards other community members
-
-## Important Notes About This Project
-
-LetterMonstr is specifically designed for macOS environments. When contributing, please keep in mind:
-
-- The application is intended for local use on macOS only
-- It is not designed for or tested on Windows, Linux, or server environments
-- The focus is on personal use rather than production/enterprise deployment
-- Compatibility with macOS (10.15 Catalina and later) must be maintained
-
-## Getting Started
+## Development setup
 
 ### Prerequisites
 
-- macOS 10.15 Catalina or later
-- Python 3.9+
-- Git
-- A Gmail account for testing (recommended to use a separate testing account)
-- Anthropic API key (for Claude integration)
+- Python 3.12
+- [Firebase CLI](https://firebase.google.com/docs/cli) (`npm install -g firebase-tools`)
+- [Google Cloud CLI](https://cloud.google.com/sdk/docs/install) (for log inspection and manual deploys)
+- A Firebase project (see `README.md` for setup)
 
-### Setup Process
+### Local environment
 
-1. **Fork the repository**
-   - Click the "Fork" button at the top right of the repository page
+```bash
+cd functions
+python3.12 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
 
-2. **Clone your fork**
+### Running tests
 
-   ```bash
-   git clone https://github.com/YOUR-USERNAME/lettermonstr.git
-   cd lettermonstr
-   ```
+```bash
+cd functions
+source venv/bin/activate
+pytest                                          # full suite
+pytest tests/test_crawler_safety.py             # one file
+pytest tests/test_utils.py::test_name           # one test
+```
 
-3. **Set up a virtual environment**
+Tests are fast (under a second) and mostly cover crawler SSRF safety, import sanity, and frontend file presence. There's no end-to-end harness for the IMAP → Claude → SMTP pipeline — after changes that touch the pipeline, run a manual end-to-end check via the **Send Summary Now** button in the deployed UI.
 
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   ```
+### Deploying
 
-4. **Install dependencies**
+```bash
+firebase deploy --project YOUR_PROJECT_ID                      # everything
+firebase deploy --only functions --project YOUR_PROJECT_ID     # just functions
+firebase deploy --only hosting --project YOUR_PROJECT_ID       # just UI
+```
 
-   ```bash
-   pip3 install -r requirements.txt
-   ```
+Two gitignored files must exist locally before deploying: `public/env-config.js` (from `env-config.template.js`) and `functions/.env` (from `.env.template`). The admin email has to match in three places — see `CLAUDE.md` § "UI ↔ backend contract".
 
-5. **Create your configuration**
+## Change guidelines
 
-   ```bash
-   python3 setup_config.py
-   ```
+- **Scope** — one feature or fix per PR. Keep changes focused.
+- **Config schema** — adding a new setting means touching `_ENV_DEFAULTS` in `functions/src/config.py`, the coercion sets (`INT_FIELDS` / `FLOAT_FIELDS` / `LIST_FIELDS`) in `public/app.js`, and the form field in `public/index.html`. The `_filter_firestore_settings` allowlist will drop anything you miss.
+- **Secrets** — only `gmail-app-password` and `anthropic-api-key` are recognized (enforced by `ALLOWED_SECRETS` in `main.py` and `SECRET_NAMES` in `config.py`). Keep them in sync.
+- **Firestore** — all access goes through `functions/src/firestore_db.py`; don't instantiate clients elsewhere.
+- **Dependencies** — pinned in `functions/requirements.txt`. Bump deliberately and re-run `pytest`.
 
-   - Use test credentials for your development environment
-   - Consider using a dedicated Gmail account for testing
+## Commit and PR style
 
-## Development Workflow
+- Lowercase, present-tense commit summaries (`fix timeouts`, `firebase refactor`)
+- Reference issues with `Fixes #N` in the PR description when applicable
+- Don't commit `.env`, `env-config.js`, or anything under `data/` (all gitignored)
 
-1. **Create a branch for your feature or bugfix**
+## Reporting issues
 
-   ```bash
-   git checkout -b feature/your-feature-name
-   # or
-   git checkout -b fix/issue-you-are-fixing
-   ```
-
-2. **Make your changes**
-   - Focus on a single feature/fix per branch
-   - Follow the coding guidelines (see below)
-   - Add appropriate comments and docstrings
-
-3. **Test your changes locally**
-   - Ensure the application still runs properly on macOS
-   - Use `test_newsletter.py` to test the email processing pipeline
-   - Manually verify that your changes work as expected
-
-4. **Commit your changes with clear commit messages**
-
-   ```bash
-   git commit -m "Clear description of your changes"
-   ```
-
-5. **Push your branch to your fork**
-
-   ```bash
-   git push origin feature/your-feature-name
-   ```
-
-6. **Create a pull request**
-   - Go to the original LetterMonstr repository
-   - Click "New pull request"
-   - Choose "compare across forks"
-   - Select your fork and branch
-   - Fill in the PR template with details about your changes
-
-## Pull Request Process
-
-1. **PR Title and Description**
-   - Use a clear, descriptive title
-   - Include a summary of changes
-   - Reference any related issues with "Fixes #issue_number"
-   - Explain your approach and reasoning
-
-2. **Review Process**
-   - PRs require at least one review before merging
-   - Address any feedback or requested changes
-   - The maintainer may request specific changes before merging
-
-3. **PR Checklist**
-   - [ ] Code follows project style guidelines
-   - [ ] Documentation is updated (if necessary)
-   - [ ] Changes have been tested on macOS
-   - [ ] Commit messages are clear and descriptive
-   - [ ] Code doesn't contain sensitive information (API keys, passwords, etc.)
-
-## Coding Guidelines
-
-### Python Style
-
-- Follow [PEP 8](https://www.python.org/dev/peps/pep-0008/) guidelines
-- Use 4 spaces for indentation (no tabs)
-- Maximum line length of 100 characters
-- Use meaningful variable and function names
-- Add docstrings to all functions, classes, and modules
-
-### Project-Specific Guidelines
-
-- Keep compatibility with macOS 10.15+ in mind
-- Ensure email handling is secure and privacy-focused
-- Any operations with external services should be respectful of API limits
-- Don't hardcode sensitive information (use config files)
-- Follow the existing project structure
-
-## Testing
-
-- Test all changes thoroughly on macOS
-- Use the `test_newsletter.py` script to test the email processing pipeline
-- For significant changes, add appropriate unit tests
-
-## Documentation
-
-- Update the README.md if your changes impact user-facing functionality
-- Include comments explaining complex sections of code
-- Keep docstrings up-to-date with changes to function signatures
-
-## Communication
-
-- Use GitHub Issues for bug reports and feature requests
-- Provide clear context and reproducible steps for bugs
-- For major changes, open an issue for discussion before submitting a PR
-
----
-
-Thank you for contributing to LetterMonstr! Your efforts help make this tool better for everyone.
+Use GitHub Issues. Include: what you expected, what happened, and relevant logs (`gcloud functions logs read <function-name> --region=us-central1 --gen2`).
