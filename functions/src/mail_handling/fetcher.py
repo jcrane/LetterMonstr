@@ -23,6 +23,26 @@ CONNECTION_TIMEOUT_SECONDS = 30
 CONNECTION_CHECK_INTERVAL = 10
 
 
+def _extract_rfc822_bytes(msg_data):
+    """Pull the RFC822 body bytes from an imaplib FETCH response.
+
+    Normal response: ``[(b'N (RFC822 {size}', b'<body>'), b')']`` — a tuple of
+    (envelope, body) first. Edge cases (message deleted between SEARCH and
+    FETCH, Gmail flag-only responses, certain large/malformed messages)
+    return ``[b'N (UID … RFC822 …)']`` — a bare bytes element with no body.
+    Indexing ``[0][1]`` into the bytes form yields an int, which then
+    explodes inside ``email.message_from_bytes``.
+    """
+    for entry in msg_data or ():
+        if (
+            isinstance(entry, tuple)
+            and len(entry) >= 2
+            and isinstance(entry[1], (bytes, bytearray))
+        ):
+            return bytes(entry[1])
+    return None
+
+
 class EmailFetcher:
     """Fetches emails from a Gmail account via IMAP."""
 
@@ -146,27 +166,43 @@ class EmailFetcher:
                 )
 
                 for e_id in all_ids:
-                    if (
-                        len(all_emails) > 0
-                        and len(all_emails) % CONNECTION_CHECK_INTERVAL == 0
-                    ):
-                        mail = self.check_connection(mail)
+                    try:
+                        if (
+                            len(all_emails) > 0
+                            and len(all_emails) % CONNECTION_CHECK_INTERVAL == 0
+                        ):
+                            mail = self.check_connection(mail)
 
-                    status, msg_data = mail.fetch(e_id, '(RFC822)')
-                    if status != 'OK':
-                        logger.warning("Failed to fetch email %s: %s", e_id, msg_data)
+                        status, msg_data = mail.fetch(e_id, '(RFC822)')
+                        if status != 'OK':
+                            logger.warning("Failed to fetch email %s: %s", e_id, msg_data)
+                            continue
+
+                        raw_bytes = _extract_rfc822_bytes(msg_data)
+                        if raw_bytes is None:
+                            logger.warning(
+                                "Unexpected IMAP response shape for email %s: %r — skipping",
+                                e_id, msg_data,
+                            )
+                            continue
+
+                        msg = email_lib.message_from_bytes(raw_bytes)
+                        subject = self._decode_header(msg.get('Subject', 'No Subject'))
+                        sender = self._decode_header(msg.get('From', 'Unknown'))
+                        logger.info("Processing email: %s from %s", subject, sender)
+
+                        parsed = self._parse_email(msg)
+                        if parsed:
+                            all_emails.append(parsed)
+                        else:
+                            logger.warning("Failed to parse email %s — skipping", subject)
+
+                    except Exception:
+                        logger.exception(
+                            "Error processing email id %s — skipping to preserve batch",
+                            e_id,
+                        )
                         continue
-
-                    msg = email_lib.message_from_bytes(msg_data[0][1])
-                    subject = self._decode_header(msg.get('Subject', 'No Subject'))
-                    sender = self._decode_header(msg.get('From', 'Unknown'))
-                    logger.info("Processing email: %s from %s", subject, sender)
-
-                    parsed = self._parse_email(msg)
-                    if parsed:
-                        all_emails.append(parsed)
-                    else:
-                        logger.warning("Failed to parse email %s — skipping", subject)
 
             self._close_connection(mail)
             logger.info(
