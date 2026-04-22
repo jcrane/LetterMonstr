@@ -69,6 +69,10 @@ Only two are recognized: `gmail-app-password` → `config["email"]["password"]`,
 - After first deploy, the two scheduler-triggered functions must be manually locked down to the scheduler SA (README §10). A fresh deploy does not re-apply this — re-run those `gcloud run services` bindings if functions are recreated.
 - `firebase.json` CSP allows `script-src` only from `self`, `gstatic.com`, `apis.google.com`; adding new frontend CDNs requires updating it.
 
+## Commits
+
+Do not add a `Co-Authored-By: Claude …` trailer to commits in this repo. Write the commit message as the sole author.
+
 ## Testing
 
 Tests live in `functions/tests/`; `functions/pyproject.toml` sets `testpaths = ["tests"]`. `conftest.py` adds `functions/` to `sys.path` and provides a `mock_content_config` fixture. Existing coverage is focused on crawler SSRF safety, import sanity, and frontend file presence — there is no end-to-end harness for the IMAP → Claude → SMTP path, so exercise that manually via the UI's "Send Summary Now" after UI- or pipeline-affecting changes.
