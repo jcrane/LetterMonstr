@@ -139,6 +139,15 @@ function populateForms(data) {
   if (tempSlider) {
     $("#temp-display").textContent = tempSlider.value;
   }
+
+  updateDayOfWeekVisibility();
+}
+
+function updateDayOfWeekVisibility() {
+  const freq = $("#summary-frequency");
+  const field = $("#summary-day_of_week-field");
+  if (!freq || !field) return;
+  field.hidden = freq.value !== "weekly";
 }
 
 // -----------------------------------------------------------------------
@@ -199,6 +208,11 @@ if (tempSlider) {
   tempSlider.addEventListener("input", () => {
     $("#temp-display").textContent = tempSlider.value;
   });
+}
+
+const frequencySelect = $("#summary-frequency");
+if (frequencySelect) {
+  frequencySelect.addEventListener("change", updateDayOfWeekVisibility);
 }
 
 // -----------------------------------------------------------------------

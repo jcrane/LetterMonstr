@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Layout
 
-All live code is under `functions/` (Python 3.12 Firebase Cloud Functions) and `public/` (static settings UI). `README.md` is the authoritative reference. `CONTRIBUTING.md` predates the Firebase refactor and is out of date — ignore it unless explicitly asked.
+All live code is under `functions/` (Python 3.12 Firebase Cloud Functions) and `public/` (static settings UI). `README.md` is the authoritative reference. `CONTRIBUTING.md`, `DEDUPLICATION_FIX_SUMMARY.md`, and `URL_HANDLING_FIX_SUMMARY.md` are historical/incident notes that predate the current code — treat them as reference-only and don't take them as live spec.
 
 ## Common commands
 
@@ -30,7 +30,7 @@ There is no linter config — match existing style (4-space indent, ~100 char li
 
 ## Architecture
 
-Four Cloud Functions defined in `functions/main.py`, all `us-central1`, 512 MB, 540 s timeout, `max_instances=1`:
+Four Cloud Functions defined in `functions/main.py`, all `us-central1`, `max_instances=1`. The first three use the shared `FUNCTION_MEMORY` / `FUNCTION_TIMEOUT` constants (512 MB, 540 s); `update_secrets` overrides to 256 MB / 30 s since it's a small synchronous write.
 
 | Function | Trigger | Auth model |
 |---|---|---|
@@ -76,3 +76,5 @@ Do not add a `Co-Authored-By: Claude …` trailer to commits in this repo. Write
 ## Testing
 
 Tests live in `functions/tests/`; `functions/pyproject.toml` sets `testpaths = ["tests"]`. `conftest.py` adds `functions/` to `sys.path` and provides a `mock_content_config` fixture. Existing coverage is focused on crawler SSRF safety, import sanity, and frontend file presence — there is no end-to-end harness for the IMAP → Claude → SMTP path, so exercise that manually via the UI's "Send Summary Now" after UI- or pipeline-affecting changes.
+
+`.github/workflows/tests.yml` runs `pytest` on every push and PR, so a failing test will block CI — not just local runs.

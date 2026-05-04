@@ -102,6 +102,19 @@
               <option value="weekly">Weekly</option>
             </select>
           </div>
+          <div class="field" id="summary-day_of_week-field" hidden>
+            <label for="summary-day_of_week">Day of Week</label>
+            <select id="summary-day_of_week" data-key="day_of_week">
+              <option value="monday">Monday</option>
+              <option value="tuesday">Tuesday</option>
+              <option value="wednesday">Wednesday</option>
+              <option value="thursday">Thursday</option>
+              <option value="friday">Friday</option>
+              <option value="saturday">Saturday</option>
+              <option value="sunday">Sunday</option>
+            </select>
+            <span class="hint">Summary is sent only on this day when frequency is Weekly.</span>
+          </div>
           <div class="field">
             <label for="summary-delivery_time">Delivery Time (UTC)</label>
             <input type="time" id="summary-delivery_time" data-key="delivery_time">

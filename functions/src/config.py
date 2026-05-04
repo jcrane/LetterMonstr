@@ -38,6 +38,7 @@ _ENV_DEFAULTS = {
         "subject_prefix": ("SUBJECT_PREFIX", "[LetterMonstr] "),
         "frequency": ("SUMMARY_FREQUENCY", "daily"),
         "delivery_time": ("DELIVERY_TIME", "18:00"),
+        "day_of_week": ("SUMMARY_DAY_OF_WEEK", "monday"),
     },
     "llm": {
         "model": ("LLM_MODEL", "claude-sonnet-4-20250514"),

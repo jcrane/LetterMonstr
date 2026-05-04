@@ -12,7 +12,7 @@ import hashlib
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import firebase_admin
 from firebase_admin import auth as firebase_auth
@@ -236,7 +236,14 @@ def _do_generate_and_send(config: dict) -> dict:
     processor = ContentProcessor(config["content"])
     deduplicated = processor.process_and_deduplicate(content_items)
 
-    history = firestore_db.get_recent_summarized_history(days=5)
+    frequency = config["summary"].get("frequency", "daily")
+    summary_format = "weekly" if frequency == "weekly" else "newsletter"
+    format_preferences = {"format": summary_format}
+    # Cross-summary dedup window: must overlap the previous run, so 9 days for
+    # weekly (7-day cadence + slack), 5 days for daily.
+    history_lookback_days = 9 if frequency == "weekly" else 5
+
+    history = firestore_db.get_recent_summarized_history(days=history_lookback_days)
     if history and deduplicated:
         deduplicated = processor.filter_with_history(deduplicated, history)
 
@@ -246,7 +253,7 @@ def _do_generate_and_send(config: dict) -> dict:
 
     logger.info("After dedup/filter: %d content items", len(deduplicated))
 
-    recent_summaries = firestore_db.get_recent_summaries(days=5)
+    recent_summaries = firestore_db.get_recent_summaries(days=history_lookback_days)
     recent_headlines = _extract_headlines_from_summaries(recent_summaries)
 
     generator = SummaryGenerator(config["llm"])
@@ -259,7 +266,11 @@ def _do_generate_and_send(config: dict) -> dict:
     for i, batch in enumerate(batches):
         logger.info("Generating summary for batch %d/%d (%d items)",
                      i + 1, len(batches), len(batch))
-        result = generator.generate_summary(batch, recent_headlines=recent_headlines)
+        result = generator.generate_summary(
+            batch,
+            format_preferences=format_preferences,
+            recent_headlines=recent_headlines,
+        )
         summary_text = result.get("summary", "") if isinstance(result, dict) else str(result)
         if summary_text and not summary_text.startswith("Error"):
             batch_summaries.append(summary_text)
@@ -275,10 +286,11 @@ def _do_generate_and_send(config: dict) -> dict:
     )
 
     now = datetime.now(timezone.utc)
+    period_start = now - timedelta(days=7) if frequency == "weekly" else now
     summary_doc_id = firestore_db.create_summary(
         summary_text=final_summary,
-        summary_type=config["summary"].get("frequency", "daily"),
-        period_start=now,
+        summary_type=frequency,
+        period_start=period_start,
         period_end=now,
     )
 
@@ -317,6 +329,27 @@ def _do_generate_and_send(config: dict) -> dict:
     }
 
 
+WEEKDAYS = {"monday", "tuesday", "wednesday", "thursday",
+            "friday", "saturday", "sunday"}
+
+
+def _is_scheduled_run_day(summary_config: dict) -> bool:
+    """Return True if today (UTC) matches the configured cadence.
+
+    Daily always returns True. Weekly returns True only on the configured
+    `day_of_week`. Unknown frequency values are treated as daily.
+    """
+    frequency = summary_config.get("frequency", "daily")
+    if frequency != "weekly":
+        return True
+    configured = str(summary_config.get("day_of_week", "monday")).strip().lower()
+    if configured not in WEEKDAYS:
+        logger.warning("Invalid day_of_week %r, defaulting to monday", configured)
+        configured = "monday"
+    today = datetime.now(timezone.utc).strftime("%A").lower()
+    return today == configured
+
+
 @https_fn.on_request(
     region=FUNCTION_REGION,
     memory=FUNCTION_MEMORY,
@@ -332,6 +365,18 @@ def generate_and_send_summary(req: https_fn.Request) -> https_fn.Response:
     except Exception:
         logger.exception("Failed to load config")
         return https_fn.Response("Config error", status=500)
+
+    if not _is_scheduled_run_day(config["summary"]):
+        logger.info(
+            "Skipping run: frequency=%s, day_of_week=%s, today=%s",
+            config["summary"].get("frequency"),
+            config["summary"].get("day_of_week"),
+            datetime.now(timezone.utc).strftime("%A").lower(),
+        )
+        return https_fn.Response(
+            json.dumps({"status": "skipped_not_scheduled_day"}),
+            status=200, content_type="application/json",
+        )
 
     try:
         result = _do_generate_and_send(config)
