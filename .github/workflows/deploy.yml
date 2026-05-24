@@ -60,18 +60,5 @@ jobs:
         with:
           credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
 
-      - uses: google-github-actions/setup-gcloud@v2
-
-      - name: Diagnostics — confirm identity and IAM
-        run: |
-          echo "=== Active identity ==="
-          gcloud auth list
-          echo
-          echo "=== Project ==="
-          gcloud config get-value project
-          echo
-          echo "=== testIamPermissions on App Engine SA ==="
-          gcloud iam service-accounts get-iam-policy lettermonstr@appspot.gserviceaccount.com || echo "policy read failed"
-
       - name: Deploy to Firebase
-        run: firebase deploy --project lettermonstr --non-interactive --force --debug
+        run: firebase deploy --project lettermonstr --non-interactive --force
