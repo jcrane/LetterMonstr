@@ -22,6 +22,7 @@ wheels/
 
 # Distribution / packaging
 .env
+!functions/.env
 venv/
 ENV/
 env/
@@ -45,6 +46,3 @@ config/config.yaml
 # Firebase local cache
 .firebase/
 
-# Deployment-specific config (contains credentials / project IDs)
-public/env-config.js
-functions/.env

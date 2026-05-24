@@ -334,14 +334,18 @@ class ContentProcessor:
                 continue
 
             if title in unique_by_title:
-                existing_content = unique_by_title[title].get('content', '')
+                existing = unique_by_title[title]
+                existing_content = existing.get('content', '')
                 new_content = item.get('content', '')
 
                 existing_len = len(existing_content) if isinstance(existing_content, str) else 0
                 new_len = len(new_content) if isinstance(new_content, str) else 0
 
                 if new_len > existing_len:
+                    self._merge_article_metadata(item, existing)
                     unique_by_title[title] = item
+                else:
+                    self._merge_article_metadata(existing, item)
             else:
                 unique_by_title[title] = item
 
@@ -361,16 +365,58 @@ class ContentProcessor:
             content_hash = hashlib.md5(content_sample.encode('utf-8')).hexdigest()
 
             if content_hash in content_hash_map:
-                existing_content = content_hash_map[content_hash].get('content', '')
+                existing = content_hash_map[content_hash]
+                existing_content = existing.get('content', '')
                 existing_len = len(existing_content) if isinstance(existing_content, str) else 0
                 new_len = len(content) if isinstance(content, str) else 0
 
                 if new_len > existing_len:
+                    self._merge_article_metadata(item, existing)
                     content_hash_map[content_hash] = item
+                else:
+                    self._merge_article_metadata(existing, item)
             else:
                 content_hash_map[content_hash] = item
 
         return list(content_hash_map.values())
+
+    @staticmethod
+    def _merge_article_metadata(keeper, other):
+        """Merge `other`'s articles into `keeper`, de-duped by normalized URL.
+
+        When two duplicate items are collapsed we keep the one with more body
+        text, but its source links may live on the discarded copy — merging the
+        article lists preserves every crawl-validated URL.
+        """
+        if not isinstance(keeper, dict) or not isinstance(other, dict):
+            return keeper
+
+        other_articles = other.get('articles')
+        if not isinstance(other_articles, list) or not other_articles:
+            return keeper
+
+        keeper_articles = keeper.get('articles')
+        if not isinstance(keeper_articles, list):
+            keeper_articles = []
+
+        def _norm(u):
+            return u.split('?', 1)[0].split('#', 1)[0].rstrip('/').lower() if u else ''
+
+        seen = {_norm(a.get('url', '')) for a in keeper_articles
+                if isinstance(a, dict) and a.get('url')}
+
+        for article in other_articles:
+            if not isinstance(article, dict):
+                continue
+            norm = _norm(article.get('url', ''))
+            if norm and norm in seen:
+                continue
+            keeper_articles.append(article)
+            if norm:
+                seen.add(norm)
+
+        keeper['articles'] = keeper_articles
+        return keeper
 
     # ------------------------------------------------------------------
     # Similarity helpers
