@@ -48,6 +48,13 @@ jobs:
       - name: Install Firebase CLI
         run: npm install -g firebase-tools
 
+      - name: Create functions venv for deploy-time SDK discovery
+        working-directory: functions
+        run: |
+          python -m venv venv
+          venv/bin/pip install --upgrade pip
+          venv/bin/pip install -r requirements.txt
+
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
