@@ -84,25 +84,33 @@ class WebCrawler:
                     continue
 
                 logger.info(f"Crawling URL: {url}")
-                page_content = self._fetch_page(url)
+                page_content, final_url = self._fetch_page(url)
 
                 if not page_content:
                     logger.warning(f"No content fetched from URL: {url}")
                     continue
 
-                extracted_content = self._extract_content(url, page_content)
+                # The GET may have followed redirects to a different destination
+                # than resolve_redirect's HEAD request; the GET final URL is the
+                # one that actually served this content, so store that.
+                final_url = final_url or url
+                if final_url != url and not self._is_safe_url(final_url):
+                    logger.warning(f"Skipping unsafe redirect destination: {final_url}")
+                    continue
+
+                extracted_content = self._extract_content(final_url, page_content)
 
                 if not extracted_content or not extracted_content.get('clean_text'):
-                    logger.warning(f"No meaningful content extracted from URL: {url}")
+                    logger.warning(f"No meaningful content extracted from URL: {final_url}")
                     continue
 
                 is_ad = self._is_advertisement(extracted_content)
                 if is_ad:
-                    logger.info(f"Content from {url} appears to be an advertisement, skipping")
+                    logger.info(f"Content from {final_url} appears to be an advertisement, skipping")
                     continue
 
                 crawled_content.append({
-                    'url': url,
+                    'url': final_url,
                     'title': extracted_content['title'],
                     'content': extracted_content['clean_text'],
                     'is_ad': is_ad,
@@ -165,20 +173,25 @@ class WebCrawler:
     # ------------------------------------------------------------------
 
     def _fetch_page(self, url):
-        """Fetch a web page and return its HTML content."""
+        """Fetch a web page and return (html, final_url).
+
+        The final URL reflects any redirects the GET request followed, so it
+        is the authoritative destination to associate with the content.
+        Returns (None, None) on non-200 responses or errors.
+        """
         try:
             logger.info(f"Fetching URL: {url}")
             response = requests.get(url, headers=self.headers, timeout=self.timeout)
 
             if response.status_code == 200:
-                return response.text
+                return response.text, response.url
 
             logger.warning(f"Failed to fetch URL: {url} (Status code: {response.status_code})")
-            return None
+            return None, None
 
         except Exception as e:
             logger.error(f"Error fetching page {url}: {e}", exc_info=True)
-            return None
+            return None, None
 
     def resolve_redirect(self, url):
         """Follow redirects to get the actual destination URL."""

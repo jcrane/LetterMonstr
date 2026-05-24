@@ -263,6 +263,7 @@ def _do_generate_and_send(config: dict) -> dict:
     logger.info("Split content into %d batches", len(batches))
 
     batch_summaries = []
+    all_source_urls = set()
     for i, batch in enumerate(batches):
         logger.info("Generating summary for batch %d/%d (%d items)",
                      i + 1, len(batches), len(batch))
@@ -272,6 +273,8 @@ def _do_generate_and_send(config: dict) -> dict:
             recent_headlines=recent_headlines,
         )
         summary_text = result.get("summary", "") if isinstance(result, dict) else str(result)
+        if isinstance(result, dict):
+            all_source_urls.update(result.get("source_urls", []))
         if summary_text and not summary_text.startswith("Error"):
             batch_summaries.append(summary_text)
 
@@ -284,6 +287,10 @@ def _do_generate_and_send(config: dict) -> dict:
         if len(batch_summaries) == 1
         else generator.combine_summaries(batch_summaries)
     )
+
+    # Final safety net: drop any "Read more" anchor whose URL was not
+    # crawl-validated (e.g. hallucinated during combine).
+    final_summary = generator._strip_unvalidated_anchors(final_summary, all_source_urls)
 
     now = datetime.now(timezone.utc)
     period_start = now - timedelta(days=7) if frequency == "weekly" else now

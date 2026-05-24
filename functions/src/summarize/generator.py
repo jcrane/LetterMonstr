@@ -8,13 +8,26 @@ No direct database access — the caller handles persistence via Firestore.
 import logging
 import re
 from datetime import datetime
+from html import escape
 from urllib.parse import urlparse
 
 from anthropic import Anthropic
-
-from src.summarize.claude_summarizer import create_claude_prompt
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
+
+# Matches source citation markers emitted by the model, tolerating common
+# formatting variance: [[S3]], [S3], (S3), {{S3}}, optional inner whitespace,
+# case-insensitive "s". Capture group 1 is the numeric source id.
+_MARKER_RE = re.compile(r'[\[\(\{]{1,2}\s*[Ss](\d{1,3})\s*[\]\)\}]{1,2}')
+
+
+def _normalize_url(url):
+    """Normalize a URL for equality comparison (strip query/fragment/trailing slash)."""
+    if not url or not isinstance(url, str):
+        return ""
+    base = url.split('?', 1)[0].split('#', 1)[0]
+    return base.rstrip('/').lower()
 
 LLM_SYSTEM_PROMPTS = {
     'newsletter': """You are an expert email summarizer that creates CONCISE, HIGH-LEVEL summaries of newsletter content. 
@@ -43,21 +56,13 @@ WITHIN-BATCH CONSOLIDATION - VERY IMPORTANT:
 * Include ALL source links from every consolidated item so the reader can explore each source.
 * Do NOT repeat the same story in multiple sections.
 
-CRITICALLY IMPORTANT - READ MORE LINKS:
-* After EACH SECTION you summarize, you MUST include links to the source content
-* Each content item has a **PRIMARY SOURCE URL** marked clearly - USE THIS as your main "Read more" link
-* If a section is marked with **ALL ADDITIONAL SOURCE URLs**, you MUST include ALL of those URLs in your summary
-* When you combine multiple content items into a single summary section, you MUST include ALL links from ALL the aggregated items
-* Format links with DESCRIPTIVE text: <a href="URL">Read more from [Publication/Source Name]</a>
-* NEVER just use "Read more" - always include the source name in the link text
-* If multiple source URLs are provided for a section, create separate "Read more" links for EACH URL
-* NEVER omit source links - they are REQUIRED for each section
-* Each link should appear on its own line after the relevant content
-* ONLY use specific article URLs - NEVER use homepage or root domain URLs
-* Examples of good link text:
-  - <a href="URL">Read more from The Verge</a>
-  - <a href="URL">Full article on TechCrunch</a>
-  - <a href="URL">Original post on Substack</a>
+CRITICALLY IMPORTANT - SOURCE CITATION MARKERS:
+* Some source blocks are labelled with a citation marker like [[S3]] (shown in the block header `--- Title [[S3]] ---` and listed under "AVAILABLE SOURCE MARKERS FOR THIS NEWSLETTER").
+* After each section you write, copy the marker(s) of every source block you drew that section's information from, exactly as written (e.g. [[S3]] or [[S1]][[S4]]). Put them on their own line at the end of the section.
+* When you consolidate multiple sources into one section, include ALL of their markers.
+* NEVER write a URL, an <a> tag, or the literal words "Read more" yourself - the system converts each marker into the correct link automatically.
+* NEVER invent or guess a marker number that was not given to you. Use only markers that actually appear in the content.
+* If a section has no associated marker, write no marker - that is fine, do not fabricate one.
 
 Be concise while preserving critical high-level information and key findings.
 Write in a professional, engaging style that provides a quick overview - users can click links for full details.
@@ -85,19 +90,13 @@ WITHIN-BATCH CONSOLIDATION - VERY IMPORTANT:
 * Include ALL source links from every consolidated item so the reader can explore each source.
 * Do NOT repeat the same story in multiple sections.
 
-CRITICALLY IMPORTANT - READ MORE LINKS:
-* After EACH SECTION you summarize, you MUST include links to the source content
-* Each content item has a **PRIMARY SOURCE URL** marked clearly - USE THIS as your main "Read more" link
-* Format links with DESCRIPTIVE text: <a href="URL">Read more from [Publication/Source Name]</a>
-* NEVER just use "Read more" - always include the source name in the link text
-* If additional source URLs are listed, create separate "Read more" links for each distinct topic/article
-* NEVER omit these source links - they are REQUIRED for each section
-* Each link should appear on its own line after the relevant content
-* ONLY use specific article URLs - NEVER use homepage or root domain URLs
-* Examples of good link text:
-  - <a href="URL">Read more from The Verge</a>
-  - <a href="URL">Full article on TechCrunch</a>
-  - <a href="URL">Original post on Substack</a>
+CRITICALLY IMPORTANT - SOURCE CITATION MARKERS:
+* Some source blocks are labelled with a citation marker like [[S3]] (shown in the block header `--- Title [[S3]] ---` and listed under "AVAILABLE SOURCE MARKERS FOR THIS NEWSLETTER").
+* After each section you write, copy the marker(s) of every source block you drew that section's information from, exactly as written (e.g. [[S3]] or [[S1]][[S4]]). Put them on their own line at the end of the section.
+* When you consolidate multiple sources into one section, include ALL of their markers.
+* NEVER write a URL, an <a> tag, or the literal words "Read more" yourself - the system converts each marker into the correct link automatically.
+* NEVER invent or guess a marker number that was not given to you. Use only markers that actually appear in the content.
+* If a section has no associated marker, write no marker - that is fine, do not fabricate one.
 
 Write in a professional, engaging style that makes complex topics accessible through concise high-level overviews.
 Focus on key findings and essential information - users can click links to explore the full depth of any topic.
@@ -137,19 +136,21 @@ class SummaryGenerator:
                 keys used for cross-summary deduplication context.
 
         Returns:
-            dict with keys: summary, title, categories, key_points.
+            dict with keys: summary, title, categories, key_points, source_urls.
         """
         logger.info(f"Generating summary for {len(processed_content)} content items")
 
-        prepared_content = self._prepare_content_for_summary(processed_content)
+        prepared_content, registry = self._prepare_content_for_summary(processed_content)
+        source_urls = [entry['url'] for entry in registry.values()]
 
-        if prepared_content.startswith("NO CONTENT"):
+        if prepared_content.startswith("NO CONTENT") or prepared_content.startswith("NO MEANINGFUL"):
             logger.error("No content available for summarization")
             return {
                 "summary": prepared_content,
                 "title": "No Content Available",
                 "categories": [],
                 "key_points": [],
+                "source_urls": [],
             }
 
         logger.info(f"Prepared content length: {len(prepared_content)} characters")
@@ -188,17 +189,20 @@ class SummaryGenerator:
 
         if not summary_text:
             logger.error("Claude API returned no summary")
-            return {"summary": "", "title": "", "categories": [], "key_points": []}
+            return {"summary": "", "title": "", "categories": [], "key_points": [],
+                    "source_urls": []}
 
         title, categories, key_points = self._extract_metadata(summary_text)
 
         summary_text = self._clean_summary(summary_text)
+        summary_text = self._expand_markers(summary_text, registry)
 
         return {
             "summary": summary_text,
             "title": title,
             "categories": categories,
             "key_points": key_points,
+            "source_urls": source_urls,
         }
 
     def combine_summaries(self, summaries):
@@ -240,16 +244,11 @@ CONTENT PRIORITIZATION - EXTREMELY IMPORTANT:
 * Remember: The goal is a quick scan to identify what's worth reading in full, not comprehensive coverage
 
 CRITICALLY IMPORTANT - SOURCE LINKS:
-* You MUST preserve ALL links from the original summaries
-* When combining multiple summaries into one section, you MUST include ALL links from ALL the aggregated content items
-* Each section in your combined summary MUST end with ALL relevant source links from all aggregated items
-* NEVER remove or omit these links - they are REQUIRED for each section of content
-* If a section aggregates content from 3 different sources, you MUST include all 3 links
-* Keep the DESCRIPTIVE link text exactly as it appears in the original summaries
-* Examples of good link text:
-  - <a href="URL">Read more from The Verge</a>
-  - <a href="URL">Full article on TechCrunch</a>
-  - <a href="URL">Original post on Substack</a>
+* The summaries below already contain finished <a href="..."> link tags.
+* Copy every <a> tag VERBATIM - never change, shorten, merge, or fabricate an href, and never invent a new URL or <a> tag of your own.
+* When you merge multiple sections into one, keep ALL of their <a> tags together in the merged section.
+* NEVER remove or omit a link - if a merged section came from 3 sources, include all 3 <a> tags.
+* Keep each link's visible text exactly as written in the original summaries.
 
 Keep the combined summary CONCISE and HIGH-LEVEL - focus on essential key findings, not exhaustive details.
 If in doubt about whether content is unique or redundant, include the key finding but keep it brief - users can click links for full details.""",
@@ -305,17 +304,20 @@ If in doubt about whether content is unique or redundant, include the key findin
     # ------------------------------------------------------------------
 
     def _prepare_content_for_summary(self, processed_content):
-        """Prepare content for summarisation with intelligent token management."""
+        """Prepare content for summarisation, tagging crawl-validated sources
+        with citation markers ([[S1]], [[S2]], ...).
+
+        Returns:
+            (formatted_text, registry) where registry maps each integer marker
+            id to {'url', 'title', 'source'}.
+        """
         formatted_content = []
 
         if not processed_content:
             logger.error("No content provided for summarization")
-            return "NO CONTENT AVAILABLE FOR SUMMARIZATION"
+            return "NO CONTENT AVAILABLE FOR SUMMARIZATION", {}
 
-        has_meaningful_content = False
-        total_content_length = 0
         min_content_length = 100
-        meaningful_items = 0
 
         def is_root_domain(url):
             if not url or not isinstance(url, str):
@@ -339,203 +341,183 @@ If in doubt about whether content is unique or redundant, include the key findin
             reverse=True,
         )
 
+        registry, article_markers = self._build_source_registry(sorted_content, is_root_domain)
+
+        has_meaningful_content = False
+        total_content_length = 0
         for item in sorted_content:
             content = item.get('content', '')
             if not content or not isinstance(content, str):
                 continue
-
             item_total_length = len(content)
-
-            if 'articles' in item and isinstance(item['articles'], list):
-                for article in item['articles']:
-                    if isinstance(article, dict) and 'content' in article:
-                        article_content = article.get('content', '')
-                        if isinstance(article_content, str):
-                            item_total_length += len(article_content)
-
+            for article in item.get('articles', []) or []:
+                if isinstance(article, dict) and isinstance(article.get('content', ''), str):
+                    item_total_length += len(article['content'])
             if item_total_length > min_content_length:
                 has_meaningful_content = True
-                meaningful_items += 1
                 total_content_length += item_total_length
-
-                if 'urls' not in item and isinstance(item.get('content', ''), str):
-                    try:
-                        url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
-                        content_urls = re.findall(url_pattern, item['content'])
-                        item['urls'] = self.filter_urls(content_urls)
-                    except Exception as e:
-                        logger.warning(f"Error extracting URLs from content: {e}")
-
-                if 'articles' in item:
-                    for article in item['articles']:
-                        if isinstance(article, dict) and 'url' in article:
-                            article_url = article['url']
-                            if not is_root_domain(article_url):
-                                if 'urls' not in item:
-                                    item['urls'] = []
-                                if article_url not in item['urls']:
-                                    item['urls'].append(article_url)
 
         if not has_meaningful_content:
             logger.error("No meaningful content found for summarization")
-            return "NO MEANINGFUL CONTENT AVAILABLE FOR SUMMARIZATION"
+            return "NO MEANINGFUL CONTENT AVAILABLE FOR SUMMARIZATION", {}
 
         max_tokens = 150000
         available_chars = max_tokens * 4
+        scale_factor = (
+            1.0 if total_content_length <= available_chars
+            else max(available_chars / total_content_length, 0.7)
+        )
 
         logger.info(
             f"Prepared content for summary: {total_content_length} characters, "
             f"~{total_content_length // 4} tokens"
         )
-
-        if total_content_length <= available_chars:
-            for item in sorted_content:
-                content = item.get('content', '')
-                if not isinstance(content, str) or len(content) < min_content_length:
-                    continue
-
-                source = item.get('source', 'Unknown Source')
-                source_links_text = self._build_source_links(item, is_root_domain)
-
-                formatted_item = f"==== {source} ====\n\n{content}{source_links_text}\n\n"
-
-                for article in item.get('articles', []):
-                    if isinstance(article, dict):
-                        article_title = article.get('title', 'Article')
-                        article_content = article.get('content', '')
-                        article_url = article.get('url', '')
-
-                        if article_content and len(article_content) > min_content_length:
-                            article_text = f"--- {article_title} ---\n{article_content}\n"
-                            if article_url and not is_root_domain(article_url):
-                                article_text += f"URL: {article_url}\n"
-                            formatted_item += article_text + "\n"
-
-                formatted_content.append(formatted_item)
-        else:
-            scale_factor = max(available_chars / total_content_length, 0.7)
+        if scale_factor < 1.0:
             logger.info(f"Scaling content by factor {scale_factor:.2f} to fit token limit")
 
-            for item in sorted_content:
-                content = item.get('content', '')
-                if not isinstance(content, str) or len(content) < min_content_length:
+        for item in sorted_content:
+            content = item.get('content', '')
+            if not isinstance(content, str) or len(content) < min_content_length:
+                continue
+
+            source = item.get('source', 'Unknown Source')
+            body = self._scale_text(content, scale_factor, floor=2000)
+            formatted_item = f"==== {source} ====\n\n{body}\n\n"
+
+            item_marker_ids = []
+            for article in item.get('articles', []) or []:
+                if not isinstance(article, dict):
+                    continue
+                article_content = article.get('content', '')
+                if not article_content or len(article_content) <= min_content_length:
                     continue
 
-                item_length = len(content)
-                scaled_length = int(item_length * scale_factor)
-                scaled_length = max(scaled_length, min(2000, item_length))
+                article_title = article.get('title', 'Article')
+                marker_id = article_markers.get(id(article))
+                marker = f" [[S{marker_id}]]" if marker_id else ""
+                if marker_id and marker_id not in item_marker_ids:
+                    item_marker_ids.append(marker_id)
 
-                if scaled_length >= item_length:
-                    truncated_content = content
-                else:
-                    sentence_end_pos = content.rfind('. ', 0, scaled_length)
-                    if sentence_end_pos > 0 and (scaled_length - sentence_end_pos) < 100:
-                        truncated_content = content[:sentence_end_pos + 1]
-                    else:
-                        truncated_content = content[:scaled_length]
+                article_body = self._scale_text(article_content, scale_factor, floor=1000)
+                formatted_item += f"--- {article_title}{marker} ---\n{article_body}\n\n"
 
-                source = item.get('source', 'Unknown Source')
-                source_links_text = self._build_source_links(item, is_root_domain)
+            if item_marker_ids:
+                formatted_item += (
+                    "AVAILABLE SOURCE MARKERS FOR THIS NEWSLETTER: "
+                    + " ".join(f"[[S{m}]]" for m in item_marker_ids)
+                    + "\n\n"
+                )
 
-                formatted_item = f"==== {source} ====\n\n{truncated_content}{source_links_text}\n\n"
+            formatted_content.append(formatted_item)
 
-                for article in item.get('articles', []):
-                    if isinstance(article, dict):
-                        article_title = article.get('title', 'Article')
-                        article_content = article.get('content', '')
-                        article_url = article.get('url', '')
+        return "\n".join(formatted_content), registry
 
-                        if article_content and len(article_content) > min_content_length:
-                            article_length = len(article_content)
-                            article_scaled = int(article_length * scale_factor)
-                            article_scaled = max(article_scaled, min(1000, article_length))
+    def _build_source_registry(self, sorted_content, is_root_domain):
+        """Assign citation markers to crawl-validated article URLs.
 
-                            if article_scaled >= article_length:
-                                article_truncated = article_content
-                            else:
-                                sentence_end = article_content.rfind('. ', 0, article_scaled)
-                                if sentence_end > 0 and (article_scaled - sentence_end) < 100:
-                                    article_truncated = article_content[:sentence_end + 1]
-                                else:
-                                    article_truncated = article_content[:article_scaled]
+        Only URLs that came from successfully crawled articles are eligible —
+        these are the destinations that were actually fetched, so they are the
+        only links guaranteed to resolve. Tracking wrappers and root-domain
+        URLs are excluded.
 
-                            article_text = f"--- {article_title} ---\n{article_truncated}\n"
-                            if article_url and not is_root_domain(article_url):
-                                article_text += f"URL: {article_url}\n"
-                            formatted_item += article_text + "\n"
+        Returns:
+            (registry, article_markers):
+                registry: {marker_id: {'url', 'title', 'source'}}
+                article_markers: {id(article_dict): marker_id}
+        """
+        registry = {}
+        article_markers = {}
+        url_to_id = {}
+        next_id = 1
 
-                formatted_content.append(formatted_item)
+        for item in sorted_content:
+            source = (item.get('source', '') or '').strip()
+            for article in item.get('articles', []) or []:
+                if not isinstance(article, dict):
+                    continue
+                url = article.get('url', '')
+                if not url or self._is_tracking_url(url) or is_root_domain(url):
+                    continue
+                norm = _normalize_url(url)
+                if not norm:
+                    continue
 
-        return "\n".join(formatted_content)
+                marker_id = url_to_id.get(norm)
+                if marker_id is None:
+                    marker_id = next_id
+                    next_id += 1
+                    url_to_id[norm] = marker_id
+                    registry[marker_id] = {
+                        'url': url,
+                        'title': (article.get('title') or '').strip(),
+                        'source': source,
+                    }
+                article_markers[id(article)] = marker_id
 
-    def _build_source_links(self, item, is_root_domain):
-        """Collect and format source-link annotations for a content item."""
-        content = item.get('content', '')
-        all_urls = []
-        primary_url = None
+        return registry, article_markers
 
-        if 'url' in item and item['url']:
-            item_url = item['url']
-            if not self._is_tracking_url(item_url) and not is_root_domain(item_url):
-                primary_url = item_url
-                all_urls.append(item_url)
+    @staticmethod
+    def _scale_text(text, scale_factor, floor):
+        """Truncate text to roughly scale_factor of its length, on a sentence
+        boundary where possible. Returns the full text when not scaling."""
+        if scale_factor >= 1.0 or not isinstance(text, str):
+            return text
+        item_length = len(text)
+        scaled_length = max(int(item_length * scale_factor), min(floor, item_length))
+        if scaled_length >= item_length:
+            return text
+        sentence_end = text.rfind('. ', 0, scaled_length)
+        if sentence_end > 0 and (scaled_length - sentence_end) < 100:
+            return text[:sentence_end + 1]
+        return text[:scaled_length]
 
-        if 'articles' in item and isinstance(item['articles'], list):
-            for article in item['articles']:
-                if isinstance(article, dict) and 'url' in article and article['url']:
-                    article_url = article['url']
-                    if (not self._is_tracking_url(article_url)
-                            and not is_root_domain(article_url)
-                            and article_url not in all_urls):
-                        all_urls.append(article_url)
-                        if not primary_url:
-                            primary_url = article_url
+    def _expand_markers(self, text, registry):
+        """Replace citation markers ([[S3]]) with validated <a> links.
 
-        if 'urls' in item and item['urls']:
-            for url in item['urls']:
-                if (not self._is_tracking_url(url)
-                        and not is_root_domain(url)
-                        and url not in all_urls):
-                    all_urls.append(url)
-                    if not primary_url:
-                        primary_url = url
+        Markers whose id is not in the registry are dropped, so the model can
+        never emit a link the system did not validate.
+        """
+        if not text:
+            return text
 
-        if isinstance(content, str):
-            url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
-            content_urls = re.findall(url_pattern, content)
-            content_urls = self.filter_urls(content_urls)
-            for url in content_urls:
-                if (not self._is_tracking_url(url)
-                        and not is_root_domain(url)
-                        and url not in all_urls):
-                    all_urls.append(url)
-                    if not primary_url:
-                        primary_url = url
+        def repl(match):
+            entry = registry.get(int(match.group(1)))
+            if not entry:
+                return ""
+            title = (entry.get('title') or '').strip()
+            source = (entry.get('source') or '').strip()
+            if title and len(title) <= 120:
+                label = f"Read more: {title}"
+            elif source:
+                label = f"Read more from {source}"
+            else:
+                label = "Read more"
+            href = escape(entry["url"], quote=True)
+            return f'<a href="{href}" class="read-more">{escape(label)}</a>'
 
-        if not all_urls:
-            return ""
+        return _MARKER_RE.sub(repl, text)
 
-        clean_urls = []
-        seen_clean = set()
-        for url in all_urls:
-            clean_url = url.split('?')[0] if '?' in url else url
-            normalized = clean_url.rstrip('/')
-            if normalized not in seen_clean and not is_root_domain(normalized):
-                clean_urls.append(clean_url)
-                seen_clean.add(normalized)
+    def _strip_unvalidated_anchors(self, html, valid_urls):
+        """Remove <a> tags whose href is not among the validated source URLs.
 
-        if not clean_urls:
-            return ""
-
-        primary_clean = clean_urls[0].split('?')[0] if '?' in clean_urls[0] else clean_urls[0]
-        source_links_text = f"\n\n**PRIMARY SOURCE URL (USE THIS FOR 'READ MORE' LINK):**\n{primary_clean}\n"
-
-        if len(clean_urls) > 1:
-            source_links_text += "\n**ALL ADDITIONAL SOURCE URLs (INCLUDE ALL OF THESE IN YOUR SUMMARY):**\n"
-            for url in clean_urls[1:]:
-                source_links_text += f"- {url}\n"
-
-        return source_links_text
+        A final safety net: even if the combine step or the model produces an
+        anchor for a URL that was never crawl-validated, it is reduced to plain
+        text here. Matching is done on normalized URLs so query/fragment
+        differences do not cause false drops.
+        """
+        if not html:
+            return html
+        valid = {_normalize_url(u) for u in (valid_urls or []) if u}
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            for link in soup.find_all('a'):
+                href = link.get('href')
+                if not href or _normalize_url(href) not in valid:
+                    link.replace_with(link.text)
+            return str(soup)
+        except Exception:
+            logger.error("Error stripping unvalidated anchors", exc_info=True)
+            return html
 
     # ------------------------------------------------------------------
     # Prompt & API
@@ -683,108 +665,3 @@ If in doubt about whether content is unique or redundant, include the key findin
                 return True
 
         return False
-
-    def _unwrap_tracking_url(self, url):
-        """Extract the actual destination URL from a tracking/redirect URL."""
-        if not url or not isinstance(url, str):
-            return url
-
-        if not self._is_tracking_url(url):
-            return url
-
-        try:
-            if 'beehiiv.com' in url or 'link.mail.beehiiv.com' in url:
-                logger.info(f"Found beehiiv tracking URL: {url}")
-
-                if 'redirect=' in url:
-                    parts = url.split('redirect=', 1)
-                    if len(parts) > 1:
-                        destination = parts[1]
-                        if '&' in destination:
-                            destination = destination.split('&', 1)[0]
-                        if destination.startswith('http'):
-                            logger.info(f"Extracted beehiiv destination URL from redirect param: {destination}")
-                            return destination
-
-                if '/to/' in url:
-                    parts = url.split('/to/', 1)
-                    if len(parts) > 1:
-                        destination = parts[1]
-                        if destination.startswith('http'):
-                            logger.info(f"Extracted beehiiv destination URL from /to/ pattern: {destination}")
-                            return destination
-
-                url_pattern = r'https?://(?!link\.mail\.beehiiv\.com|beehiiv\.com)(?:[-\w.]|(?:%[\da-fA-F]{2}))+'
-                embedded_urls = re.findall(url_pattern, url)
-
-                if embedded_urls:
-                    destination = embedded_urls[-1]
-                    logger.info(f"Extracted beehiiv destination URL using regex: {destination}")
-                    return destination
-
-                logger.warning(f"Could not extract destination from beehiiv URL: {url}")
-                return None
-
-            if 'tracking.tldrnewsletter.com/CL0/' in url:
-                parts = url.split('CL0/', 1)
-                if len(parts) > 1:
-                    actual_url = parts[1].split('/', 1)[0] if '/' in parts[1] else parts[1]
-                    return actual_url
-
-            embedded_urls = re.findall(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+', url)
-
-            if embedded_urls:
-                for embedded_url in embedded_urls:
-                    is_tracking = any(domain in embedded_url for domain in [
-                        'beehiiv.com', 'substack.com', 'mailchimp.com',
-                        'tracking.tldrnewsletter.com', 'link.mail.beehiiv.com',
-                    ])
-                    if not is_tracking:
-                        return embedded_url
-
-            return None
-
-        except Exception as e:
-            logger.error(f"Error unwrapping tracking URL {url}: {e}", exc_info=True)
-            return None
-
-    def filter_urls(self, urls, max_urls=50):
-        """Filter a list of URLs, removing tracking links and root domains."""
-        if not urls:
-            return []
-
-        unique_urls = list(set(urls))
-
-        if len(unique_urls) > max_urls:
-            logger.info(f"Limiting URL filtering from {len(unique_urls)} to {max_urls} URLs")
-            unique_urls = unique_urls[:max_urls]
-
-        filtered = []
-        filtered_count = 0
-
-        problematic_domains = [
-            'media.beehiiv.com', 'link.mail.beehiiv.com',
-            'mailchimp.com',
-            'link.genai.works',
-        ]
-
-        for url in unique_urls:
-            if not isinstance(url, str):
-                continue
-
-            if not url.lower().startswith(('http://', 'https://')):
-                continue
-
-            parsed_url = urlparse(url)
-            domain = parsed_url.netloc.lower()
-            if any(domain.endswith(prob) for prob in problematic_domains):
-                filtered_count += 1
-                if filtered_count <= 3:
-                    logger.info(f"Filtering out tracking domain URL: {url}")
-                elif filtered_count == 4:
-                    logger.info("Filtering out additional tracking domain URLs (limiting log output)")
-                continue
-
-            filtered.append(url)
-
-        return filtered
