@@ -48,46 +48,10 @@ jobs:
       - name: Install Firebase CLI
         run: npm install -g firebase-tools
 
-      - name: Write functions/.env
-        env:
-          AUTHORIZED_EMAIL: ${{ secrets.AUTHORIZED_EMAIL }}
-        run: |
-          umask 077
-          cat > functions/.env <<EOF
-          AUTHORIZED_EMAIL=$AUTHORIZED_EMAIL
-          EOF
-
-      - name: Write public/env-config.js
-        env:
-          FB_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
-          FB_AUTH_DOMAIN: ${{ secrets.FIREBASE_AUTH_DOMAIN }}
-          FB_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
-          FB_STORAGE_BUCKET: ${{ secrets.FIREBASE_STORAGE_BUCKET }}
-          FB_SENDER_ID: ${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}
-          FB_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
-          AUTH_EMAIL: ${{ secrets.AUTHORIZED_EMAIL }}
-        run: |
-          cat > public/env-config.js <<EOF
-          window.LETTERMONSTR_CONFIG = {
-            firebase: {
-              apiKey: "$FB_API_KEY",
-              authDomain: "$FB_AUTH_DOMAIN",
-              projectId: "$FB_PROJECT_ID",
-              storageBucket: "$FB_STORAGE_BUCKET",
-              messagingSenderId: "$FB_SENDER_ID",
-              appId: "$FB_APP_ID",
-            },
-            authorizedEmail: "$AUTH_EMAIL",
-            region: "us-central1",
-          };
-          EOF
-
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
 
       - name: Deploy to Firebase
-        run: firebase deploy --project "$FIREBASE_PROJECT_ID" --non-interactive --force
-        env:
-          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+        run: firebase deploy --project lettermonstr --non-interactive --force

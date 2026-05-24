@@ -64,8 +64,8 @@ Only two are recognized: `gmail-app-password` → `config["email"]["password"]`,
 
 ## Deployment gotchas
 
-- `public/env-config.js` and `functions/.env` are gitignored. They must exist locally before `firebase deploy`, or the UI shows "Missing Configuration" and the functions reject every request. Templates: `public/env-config.template.js`, `functions/.env.template`.
-- `firestore.rules` has a hardcoded admin email (currently `jeremycrane@gmail.com`) that must be edited for other deployments.
+- CI deploys via `.github/workflows/deploy.yml` on every push to `main` (after tests pass). Only one GitHub secret is needed: `FIREBASE_SERVICE_ACCOUNT` (the `github-actions-deploy@lettermonstr.iam.gserviceaccount.com` JSON key). The deploy job uses the `production` GitHub environment.
+- `public/env-config.js` and `functions/.env` are checked in. They contain only the admin email (already hardcoded in `firestore.rules`) and the Firebase Web SDK config (which ships to every browser anyway). If you fork this repo for a different deployment, edit those two files plus `firestore.rules` together.
 - After first deploy, the two scheduler-triggered functions must be manually locked down to the scheduler SA (README §10). A fresh deploy does not re-apply this — re-run those `gcloud run services` bindings if functions are recreated.
 - `firebase.json` CSP allows `script-src` only from `self`, `gstatic.com`, `apis.google.com`; adding new frontend CDNs requires updating it.
 
