@@ -116,6 +116,20 @@ class TestExpandMarkers:
         assert "S9" not in out
         assert "[[" not in out
 
+    def test_adjacent_markers_separated_by_line_break(self, generator):
+        registry = {
+            1: {"url": "https://example.com/1", "title": "", "source": "A"},
+            2: {"url": "https://example.com/2", "title": "", "source": "B"},
+        }
+        out = generator._expand_markers("Section. [[S1]][[S2]]", registry)
+        assert out.count("<a href=") == 2
+        assert "</a><br><a " in out
+
+    def test_single_marker_has_no_line_break(self, generator):
+        registry = {1: {"url": "https://example.com/1", "title": "", "source": "A"}}
+        out = generator._expand_markers("Section. [[S1]]", registry)
+        assert "<br>" not in out
+
     def test_escapes_untrusted_title(self, generator):
         registry = {1: {"url": "https://example.com/x",
                         "title": 'Tom & Jerry <script>', "source": "A"}}

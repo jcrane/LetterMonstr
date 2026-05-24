@@ -495,7 +495,16 @@ If in doubt about whether content is unique or redundant, include the key findin
             href = escape(entry["url"], quote=True)
             return f'<a href="{href}" class="read-more">{escape(label)}</a>'
 
-        return _MARKER_RE.sub(repl, text)
+        expanded = _MARKER_RE.sub(repl, text)
+        # When a section cites several sources, the markers may be adjacent
+        # (e.g. [[S1]][[S4]]). Separate consecutive "Read more" links with a
+        # line break so each renders on its own line as a list.
+        expanded = re.sub(
+            r'</a>\s*(<a [^>]*class="read-more")',
+            r'</a><br>\1',
+            expanded,
+        )
+        return expanded
 
     def _strip_unvalidated_anchors(self, html, valid_urls):
         """Remove <a> tags whose href is not among the validated source URLs.
