@@ -454,6 +454,15 @@ If in doubt about whether content is unique or redundant, include the key findin
                     }
                 article_markers[id(article)] = marker_id
 
+        logger.info(
+            "Source registry built: %d unique URLs from %d items",
+            len(registry), len(sorted_content),
+        )
+        for mid, entry in list(registry.items())[:5]:
+            logger.info("  [S%d] %s — %s", mid, entry['source'][:60], entry['url'])
+        if len(registry) > 5:
+            logger.info("  ... and %d more", len(registry) - 5)
+
         return registry, article_markers
 
     @staticmethod
@@ -479,6 +488,16 @@ If in doubt about whether content is unique or redundant, include the key findin
         """
         if not text:
             return text
+
+        marker_matches = list(_MARKER_RE.finditer(text))
+        unknown_count = sum(
+            1 for m in marker_matches if int(m.group(1)) not in registry
+        )
+        expanded_count = len(marker_matches) - unknown_count
+        logger.info(
+            "Marker expansion: %d markers in text, %d expanded, %d dropped (id not in registry of %d)",
+            len(marker_matches), expanded_count, unknown_count, len(registry),
+        )
 
         def repl(match):
             entry = registry.get(int(match.group(1)))
@@ -519,10 +538,19 @@ If in doubt about whether content is unique or redundant, include the key findin
         valid = {_normalize_url(u) for u in (valid_urls or []) if u}
         try:
             soup = BeautifulSoup(html, 'html.parser')
-            for link in soup.find_all('a'):
+            anchors = list(soup.find_all('a'))
+            stripped = 0
+            for link in anchors:
                 href = link.get('href')
                 if not href or _normalize_url(href) not in valid:
+                    if href:
+                        logger.info("Stripping unvalidated anchor: %s", href)
                     link.replace_with(link.text)
+                    stripped += 1
+            logger.info(
+                "Anchor strip: %d anchors checked, %d kept, %d stripped (validity set: %d URLs)",
+                len(anchors), len(anchors) - stripped, stripped, len(valid),
+            )
             return str(soup)
         except Exception:
             logger.error("Error stripping unvalidated anchors", exc_info=True)
@@ -660,10 +688,6 @@ If in doubt about whether content is unique or redundant, include the key findin
             '/redirect/',
             '/track/',
             '/click?',
-            'utm_source=',
-            'utm_medium=',
-            'utm_campaign=',
-            'referrer=',
             '/ss/c/',
             'CL0/',
             'link.alphasignal.ai',

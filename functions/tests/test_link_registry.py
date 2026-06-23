@@ -63,6 +63,23 @@ class TestSourceRegistry:
         _, registry = generator._prepare_content_for_summary(items)
         assert set(registry.keys()) == {1}
 
+    def test_includes_article_with_utm_params(self, generator):
+        # Real article URLs frequently carry utm_* params from the campaign that
+        # delivered the newsletter. They must NOT be treated as tracking
+        # wrappers; otherwise the registry empties out and no link survives.
+        items = [
+            _item("Newsletter A", "x" * 200, [
+                {
+                    "title": "Real Article",
+                    "url": "https://verge.com/2026/05/24/ai?utm_source=tldr&utm_medium=email",
+                    "content": "y" * 200,
+                },
+            ]),
+        ]
+        _, registry = generator._prepare_content_for_summary(items)
+        assert len(registry) == 1
+        assert registry[1]["url"].startswith("https://verge.com/2026/05/24/ai")
+
     def test_excludes_tracking_and_root_urls(self, generator):
         items = [
             _item("Newsletter A", "x" * 200, [
