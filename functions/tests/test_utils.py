@@ -107,13 +107,13 @@ class TestFilterFirestoreSettings:
         from src.config import _filter_firestore_settings
         raw = {
             "llm": {
-                "model": "claude-sonnet-4-20250514",
+                "model": "claude-sonnet-5-5",
                 "unknown_key": "bad_value",
             },
         }
         filtered = _filter_firestore_settings(raw)
         assert "unknown_key" not in filtered["llm"]
-        assert filtered["llm"]["model"] == "claude-sonnet-4-20250514"
+        assert filtered["llm"]["model"] == "claude-sonnet-5-5"
 
     def test_allows_all_valid_keys(self):
         from src.config import _filter_firestore_settings, _ENV_DEFAULTS

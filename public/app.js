@@ -1,18 +1,18 @@
-import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.0/firebase-app.js";
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
 import {
   getAuth,
   signInWithPopup,
   signOut,
   onAuthStateChanged,
   GoogleAuthProvider,
-} from "https://www.gstatic.com/firebasejs/11.6.0/firebase-auth.js";
+} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
 import {
   getFirestore,
   doc,
   getDoc,
   updateDoc,
   serverTimestamp,
-} from "https://www.gstatic.com/firebasejs/11.6.0/firebase-firestore.js";
+} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
 
 const ENV = window.LETTERMONSTR_CONFIG;
 if (!ENV) {

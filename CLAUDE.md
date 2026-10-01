@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Layout
 
-All live code is under `functions/` (Python 3.12 Firebase Cloud Functions) and `public/` (static settings UI). `README.md` is the authoritative reference. `CONTRIBUTING.md`, `DEDUPLICATION_FIX_SUMMARY.md`, and `URL_HANDLING_FIX_SUMMARY.md` are historical/incident notes that predate the current code — treat them as reference-only and don't take them as live spec.
+All live code is under `functions/` (Python 3.14 Firebase Cloud Functions) and `public/` (static settings UI). `README.md` is the authoritative reference. `CONTRIBUTING.md`, `DEDUPLICATION_FIX_SUMMARY.md`, and `URL_HANDLING_FIX_SUMMARY.md` are historical/incident notes that predate the current code — treat them as reference-only and don't take them as live spec.
 
 ## Common commands
 

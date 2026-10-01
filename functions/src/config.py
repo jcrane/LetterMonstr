@@ -41,8 +41,8 @@ _ENV_DEFAULTS = {
         "day_of_week": ("SUMMARY_DAY_OF_WEEK", "monday"),
     },
     "llm": {
-        "model": ("LLM_MODEL", "claude-sonnet-4-20250514"),
-        "max_tokens": ("LLM_MAX_TOKENS", 16000),
+        "model": ("LLM_MODEL", "claude-sonnet-5-5"),
+        "max_tokens": ("LLM_MAX_TOKENS", 32000),
         "temperature": ("LLM_TEMPERATURE", 0.5),
     },
     "content": {
@@ -59,6 +59,12 @@ INT_FIELDS = {"imap_port", "smtp_port", "max_tokens", "max_links_per_email",
               "max_link_depth", "request_timeout", "initial_lookback_days"}
 FLOAT_FIELDS = {"temperature"}
 COMMA_SPLIT_FIELDS = {"folders", "ad_keywords"}
+
+# Models the summarizer is built for. A stored setting naming an older Opus or
+# Sonnet (e.g. a settings/app_config doc saved before an upgrade) is mapped to
+# the current model of the same family so it never runs on a retired ID.
+SUPPORTED_MODELS = {"claude-opus-5-5", "claude-sonnet-5-5"}
+_MODEL_FAMILY_UPGRADES = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5"}
 
 
 def _get_project_id() -> str:
@@ -156,6 +162,19 @@ def _load_firestore_settings() -> dict | None:
     return None
 
 
+def _upgrade_legacy_model(llm: dict) -> None:
+    """Rewrite an outdated Opus/Sonnet model ID to the current one in place."""
+    model = llm.get("model", "")
+    if model in SUPPORTED_MODELS:
+        return
+    for family, replacement in _MODEL_FAMILY_UPGRADES.items():
+        if model.startswith(f"claude-{family}"):
+            logger.warning("Upgrading configured model %s -> %s", model, replacement)
+            llm["model"] = replacement
+            return
+    logger.warning("Configured model %s is not a supported model", model)
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     """Recursively merge *override* into *base* (override wins)."""
     merged = dict(base)
@@ -199,6 +218,8 @@ def load_config() -> dict:
     firestore_settings = _load_firestore_settings()
     if firestore_settings:
         config = _deep_merge(config, firestore_settings)
+
+    _upgrade_legacy_model(config["llm"])
 
     _load_secrets(config)
 

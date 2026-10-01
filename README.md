@@ -25,7 +25,7 @@ Firestore ─────> Cloud Function (daily) ──> Summary Email
 
 - [Firebase CLI](https://firebase.google.com/docs/cli) (`npm install -g firebase-tools`)
 - [Google Cloud CLI](https://cloud.google.com/sdk/docs/install) (`gcloud`)
-- Python 3.12+
+- Python 3.14+
 - A Gmail account with [2-Step Verification](https://myaccount.google.com/security) and an [App Password](https://myaccount.google.com/apppasswords)
 - An [Anthropic API key](https://console.anthropic.com/)
 
@@ -217,7 +217,7 @@ The UI lets you configure:
 | **Manual Summary** | Send a summary on demand from collected content |
 | **Email / Inbox** | Fetch email, IMAP server/port, folders, lookback days, periodic fetch toggle |
 | **Summary / Delivery** | Recipient email, sender email, SMTP server/port, subject prefix, frequency, delivery time |
-| **LLM** | Model (Claude Opus 4.6, Claude Sonnet 4.6), max tokens, temperature |
+| **LLM** | Model (Claude Opus 5.5, Claude Sonnet 5.5), max tokens, temperature |
 | **Content / Crawling** | Max links per email, max link depth, request timeout, user agent, ad keywords |
 | **Secrets** | Gmail App Password, Anthropic API Key (write-only) |
 
