@@ -16,6 +16,10 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
+# Effort for every summarization call. Summarizing curated newsletter text
+# doesn't need deep deliberation; raise to "high" if quality falls short.
+LLM_EFFORT = "medium"
+
 # Matches source citation markers emitted by the model, tolerating common
 # formatting variance: [[S3]], [S3], (S3), {{S3}}, optional inner whitespace,
 # case-insensitive "s". Capture group 1 is the numeric source id.
@@ -586,15 +590,35 @@ If in doubt about whether content is unique or redundant, include the key findin
             user_chars = len(prompt.get('user', ''))
             logger.info(f"Prompt size: system={system_chars} chars, user={user_chars} chars")
 
-            with self.client.messages.stream(
+            # Thinking is always on for the 5.5 models; effort is the control
+            # (Opus 5.5 defaults to medium, Sonnet 5.5 to high, so pin it).
+            # The server-side fallback reruns a safety-classifier refusal on a
+            # suitable model instead of returning an empty summary.
+            with self.client.beta.messages.stream(
                 model=self.model,
                 max_tokens=self.max_tokens,
                 system=prompt['system'],
                 messages=[{"role": "user", "content": prompt['user']}],
+                output_config={"effort": LLM_EFFORT},
+                fallbacks="default",
+                betas=["server-side-fallback-2026-07-01"],
             ) as stream:
                 response = stream.get_final_message()
 
-            summary = response.content[0].text
+            if response.stop_reason == "refusal":
+                category = getattr(response.stop_details, "category", None)
+                logger.error(f"Claude declined the request (category={category})")
+                return None
+            if response.stop_reason == "max_tokens":
+                logger.warning(f"Claude output hit max_tokens={self.max_tokens}; "
+                               "summary may be truncated")
+
+            # The response can open with thinking blocks, so collect text by type.
+            summary = "".join(block.text for block in response.content
+                              if block.type == "text")
+            if not summary:
+                logger.error(f"Claude returned no text (stop_reason={response.stop_reason})")
+                return None
             logger.info(f"Claude API responded with {len(summary)} characters")
 
             return summary
